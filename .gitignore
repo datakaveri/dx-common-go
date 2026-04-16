@@ -1,0 +1,35 @@
+# Go build & test artifacts
+*.out
+*.exe
+*.exe~
+*.dll
+*.so
+*.so.*
+*.dylib
+/bin/
+/dist/
+tmp/
+
+# Test coverage
+*.coverprofile
+coverage.out
+coverage.html
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Hot reload
+air
