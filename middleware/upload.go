@@ -45,13 +45,6 @@ func ValidateMultipartUpload(cfg UploadConfig) func(http.Handler) http.Handler {
 
 			// Parse multipart form with size limits
 			if err := r.ParseMultipartForm(cfg.MaxMemory); err != nil {
-				if err == http.ErrMessageTooLarge {
-					dxerrors.WriteError(w, dxerrors.NewValidation(
-						"file too large",
-						"maximum file size is "+formatBytes(cfg.MaxFileSize),
-					))
-					return
-				}
 				dxerrors.WriteError(w, dxerrors.NewValidation("failed to parse form", err.Error()))
 				return
 			}

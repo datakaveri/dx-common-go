@@ -69,7 +69,7 @@ func (rl *RateLimiter) getLimiter(key string) *rate.Limiter {
 func (rl *RateLimiter) getKey(r *http.Request) string {
 	if rl.cfg.PerUser {
 		// Try to get user ID from context
-		if user := GetUserFromCtx(r.Context()); user != nil && user.ID != "" {
+		if user, ok := GetUserFromCtx(r.Context()); ok && user.ID != "" {
 			return "user:" + user.ID
 		}
 	}

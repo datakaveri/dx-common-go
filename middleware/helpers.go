@@ -7,9 +7,8 @@ import (
 )
 
 // GetUserFromCtx retrieves the user from request context
-func GetUserFromCtx(ctx context.Context) *auth.DxUser {
-	user := auth.UserFromCtx(ctx)
-	return &user
+func GetUserFromCtx(ctx context.Context) (auth.DxUser, bool) {
+	return auth.UserFromCtx(ctx)
 }
 
 // GetRequestIDFromCtx retrieves the request ID from context
