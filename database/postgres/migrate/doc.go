@@ -1,12 +1,15 @@
-// Package migrate wraps golang-migrate/migrate/v4 into the convention this
-// platform standardized on for Go-owned schema evolution (ROADMAP.md PH-3
-// W8, GO-STANDARDS-ROLLOUT_PLAN.md R1):
+// Package migrate wraps pressly/goose/v3 into the convention this platform
+// standardized on for Go-owned schema evolution (ROADMAP.md PH-3 W8,
+// GO-STANDARDS-ROLLOUT_PLAN.md R1):
 //
-//   - SQL-first paired files, embedded in the service binary via embed.FS:
-//     migrations/0001_title.up.sql
-//     migrations/0001_title.down.sql
-//     Zero-padded sequential versions, not timestamps, so ordering is
-//     reviewable in a diff.
+//   - SQL-first single files, embedded in the service binary via embed.FS:
+//     migrations/0001_title.sql, with -- +goose Up / -- +goose Down section
+//     markers. Zero-padded sequential versions, not timestamps, so ordering
+//     is reviewable in a diff. Any statement containing its own semicolons
+//     (a `DO $$ ... END $$;` block, a `CREATE FUNCTION ... AS $$ ... $$;`
+//     body) MUST be wrapped in -- +goose StatementBegin / -- +goose
+//     StatementEnd — goose's statement splitter has no awareness of
+//     dollar-quoting and will otherwise shred it mid-statement.
 //
 //   - The Go migration system owns the schema. The schema that exists today
 //     is the platform's baseline, captured as each service's migration 0001,
@@ -26,16 +29,17 @@
 //
 //   - Per-service migrations table. Multiple services share the interim
 //     iudx_db, so each Run call passes its own history table via
-//     Config.TableName (schema_migrations_<service>) — the equivalent of
-//     the DSN's x-migrations-table option, expressed through
-//     golang-migrate's Config.MigrationsTable instead.
+//     Config.TableName (schema_migrations_<service>) — expressed through
+//     goose's WithTableName provider option.
 //
-//   - Dirty-state handling is loud. If a migration fails partway, golang-migrate
-//     marks the tracked version dirty and refuses to run anything further.
-//     Run surfaces that as a *DirtyStateError naming the exact version — do
-//     not swallow it and boot anyway. Recovery: fix the underlying issue by
-//     hand, then run `migrate force <version>` (via a one-off using the same
-//     Config) before restarting the service.
+//   - Partial-failure handling is loud but simple. goose applies each
+//     migration in its own transaction and only records a version as
+//     applied on success, so a failed migration rolls back automatically —
+//     there is no dirty state to get stuck in. Run surfaces a failure as a
+//     *PartialMigrationError naming the exact version that failed; do not
+//     swallow it and boot anyway. Recovery: fix the migration (or the
+//     underlying DB issue) and restart the service — goose retries from the
+//     failed version on the next Run, no manual `force` step needed.
 //
 //   - Zero-downtime pattern (normative): expand → migrate → contract.
 //     Additive DDL first (new column/table/index CONCURRENTLY), ship code

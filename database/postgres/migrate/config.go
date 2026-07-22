@@ -35,19 +35,28 @@ type Config struct {
 	SearchPath string
 }
 
-// DirtyStateError reports that the migrations table is marked dirty: a
-// previous migration failed partway through and golang-migrate refuses to
-// run anything further until it's resolved. Callers must treat this as
-// fatal — never start the service against a dirty schema.
-type DirtyStateError struct {
-	Version uint
+// PartialMigrationError reports that a migration run stopped partway
+// through: Version failed, and everything before it already committed.
+// Unlike golang-migrate's dirty-state model, goose runs each migration in
+// its own transaction and only records a version as applied on success — a
+// failed migration rolls back automatically and is never left "dirty" in
+// the tracking table. Recovery is just fixing the migration (or the
+// underlying DB issue) and restarting the service; goose retries from
+// Version on the next Run. No manual `force` step exists or is needed.
+type PartialMigrationError struct {
+	Version int64
 	Table   string
+	Err     error
 }
 
-func (e *DirtyStateError) Error() string {
+func (e *PartialMigrationError) Error() string {
 	return fmt.Sprintf(
-		"migrate: migrations table %q is dirty at version %d — a prior migration failed partway "+
-			"through; fix the database by hand, then `migrate force %d` before restarting",
-		e.Table, e.Version, e.Version,
+		"migrate: migration %d failed (table %q): %v — migrations before it are committed; "+
+			"fix the migration and restart, no manual recovery step is needed",
+		e.Version, e.Table, e.Err,
 	)
+}
+
+func (e *PartialMigrationError) Unwrap() error {
+	return e.Err
 }

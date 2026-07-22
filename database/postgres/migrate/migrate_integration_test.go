@@ -19,6 +19,9 @@ import (
 //go:embed testdata
 var testFS embed.FS
 
+//go:embed testdata_partial
+var testPartialFS embed.FS
+
 func tableName(t *testing.T) string {
 	name := strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
 	return strings.ToLower("schema_migrations_" + name)
@@ -33,9 +36,9 @@ func TestRun_AppliesAndIsIdempotent(t *testing.T) {
 	if err := dxmigrate.Run(cfg, testFS, "testdata", nil); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
-	// Second call must hit golang-migrate's ErrNoChange path internally and
-	// still return nil — proving Run's idempotent-rerun handling works
-	// against a real Postgres, not just in the ModeNone unit test.
+	// Second call must see zero pending migrations and still return nil —
+	// proving Run's idempotent-rerun handling works against a real
+	// Postgres, not just in the ModeNone unit test.
 	if err := dxmigrate.Run(cfg, testFS, "testdata", nil); err != nil {
 		t.Fatalf("second (idempotent) Run: %v", err)
 	}
@@ -105,30 +108,54 @@ func TestStatus_NoMigrationsRunYet_ReturnsZero(t *testing.T) {
 	}
 }
 
-func TestRun_DirtyState_ReturnsDirtyStateError(t *testing.T) {
+// TestRun_PartialFailure_ReturnsPartialMigrationErrorThenRecoversOnRerun
+// proves goose's actual recovery story: a migration that fails partway
+// rolls back its own transaction and is never recorded, so — unlike
+// golang-migrate's dirty-state model — no manual `force` step is needed.
+// Fixing the migration and rerunning Run (same Config, same table) just
+// works.
+func TestRun_PartialFailure_ReturnsPartialMigrationErrorThenRecoversOnRerun(t *testing.T) {
 	h := containers.Postgres(t)
 	table := tableName(t)
 	cfg := dxmigrate.Config{Mode: dxmigrate.ModeMigrate, DSN: h.DSN, TableName: table}
 	ctx := context.Background()
-	t.Cleanup(func() { h.Pool.Exec(ctx, "DROP TABLE IF EXISTS "+table) })
+	t.Cleanup(func() {
+		h.Pool.Exec(ctx, "DROP TABLE IF EXISTS "+table)
+		h.Pool.Exec(ctx, "DROP TABLE IF EXISTS migrate_partial_test_1")
+		h.Pool.Exec(ctx, "DROP TABLE IF EXISTS migrate_partial_test_2")
+	})
 
-	if err := dxmigrate.Run(cfg, testFS, "testdata", nil); err != nil {
-		t.Fatalf("initial Run: %v", err)
+	// 0002's Up section fails on its 2nd statement; 0001 commits, 0002 rolls
+	// back entirely and is never recorded as applied.
+	err := dxmigrate.Run(cfg, testPartialFS, "testdata_partial/broken", nil)
+	var partialErr *dxmigrate.PartialMigrationError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("expected a *PartialMigrationError, got %v", err)
+	}
+	if partialErr.Version != 2 {
+		t.Fatalf("expected PartialMigrationError.Version = 2, got %d", partialErr.Version)
+	}
+	if partialErr.Table != table {
+		t.Fatalf("expected PartialMigrationError.Table = %q, got %q", table, partialErr.Table)
 	}
 
-	// Manually mark the migrations table dirty, simulating a prior migration
-	// that failed partway through — golang-migrate refuses to run anything
-	// further until this is cleared by hand.
-	if _, err := h.Pool.Exec(ctx, "UPDATE "+table+" SET dirty = true"); err != nil {
-		t.Fatalf("force dirty state: %v", err)
+	version, _, verr := dxmigrate.Status(cfg, testPartialFS, "testdata_partial/broken")
+	if verr != nil {
+		t.Fatalf("Status after partial failure: %v", verr)
+	}
+	if version != 1 {
+		t.Fatalf("expected version=1 committed before the failure, got version=%d", version)
 	}
 
-	err := dxmigrate.Run(cfg, testFS, "testdata", nil)
-	var dirtyErr *dxmigrate.DirtyStateError
-	if !errors.As(err, &dirtyErr) {
-		t.Fatalf("expected a *DirtyStateError, got %v", err)
+	// Fix migration 0002 and rerun — no force/unlock step, just Run again.
+	if err := dxmigrate.Run(cfg, testPartialFS, "testdata_partial/fixed", nil); err != nil {
+		t.Fatalf("Run after fixing the migration: %v", err)
 	}
-	if dirtyErr.Table != table {
-		t.Fatalf("expected DirtyStateError.Table = %q, got %q", table, dirtyErr.Table)
+	version, _, verr = dxmigrate.Status(cfg, testPartialFS, "testdata_partial/fixed")
+	if verr != nil {
+		t.Fatalf("Status after recovery: %v", verr)
+	}
+	if version != 2 {
+		t.Fatalf("expected version=2 after recovery, got version=%d", version)
 	}
 }
