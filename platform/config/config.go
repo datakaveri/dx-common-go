@@ -148,12 +148,19 @@ type Base struct {
 // and none to forget. It is named PlatformConfig rather than Base because a
 // method may not share a name with the embedded field it would be reached
 // through.
+//
+// It takes a VALUE receiver and returns a VALUE, deliberately. A pointer
+// receiver would mean only *Config satisfies the interface, so a generic
+// constrained on `C Configurer` could not be instantiated with the config type
+// itself — every call site would need an explicit pointer type parameter.
+// Returning a value also makes it obvious the result is read-only: bootstrap
+// consults these settings, it never edits them.
 type Configurer interface {
-	PlatformConfig() *Base
+	PlatformConfig() Base
 }
 
 // PlatformConfig implements Configurer.
-func (b *Base) PlatformConfig() *Base { return b }
+func (b Base) PlatformConfig() Base { return b }
 
 // Server is the HTTP server's configuration.
 type Server struct {
