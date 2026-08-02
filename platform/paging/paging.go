@@ -122,6 +122,13 @@ type Page[T any] struct {
 	Info  Info `json:"paginationInfo"`
 }
 
+// Parts returns the items and metadata as untyped values.
+//
+// It exists so a renderer can handle any Page[T] without knowing T — Go cannot
+// type-switch on a generic instantiation, so platform/http detects a page
+// through this method instead. paging stays free of any HTTP dependency.
+func (p Page[T]) Parts() (any, Info) { return p.Items, p.Info }
+
 // NewPage builds a Page, normalising a nil slice to an empty one.
 func NewPage[T any](items []T, r Request, totalCount int64) Page[T] {
 	if items == nil {
