@@ -172,8 +172,8 @@ func TestRequireGatewayOriginRejectsDirect(t *testing.T) {
 	// Use the dev-mode JWT path (Enabled=false → synthetic user). The
 	// resolver tags this as OriginDirect; RequireGatewayOrigin must 403.
 	resolverMW := resolver.Middleware(resolver.Config{
-		Headers: dxheaders.Config{Secret: []byte("secret")},
-		JWT:     dxjwt.Config{Enabled: false},
+		Headers:     dxheaders.Config{Secret: []byte("secret")},
+		JWT:         dxjwt.Config{Enabled: false},
 		AllowDirect: true,
 	})
 	gateOnly := resolver.RequireGatewayOrigin()

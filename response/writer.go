@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/datakaveri/dx-common-go/pagination"
+	"github.com/datakaveri/dx-common-go/platform/paging"
 )
 
 // Write serialises body as JSON with the given statusCode.
@@ -42,8 +42,8 @@ func WritePaginated[T any](w http.ResponseWriter, results T, pg PaginationInfo, 
 
 // WritePaginatedInfo writes a 200 OK response with a nested "paginationInfo"
 // object (control-plane contract shape: page/size/totalCount/totalPages/
-// hasNext/hasPrevious). Use pagination.NewInfo to build info.
-func WritePaginatedInfo[T any](w http.ResponseWriter, results T, info pagination.Info, title, detail string) {
+// hasNext/hasPrevious). Use paging.NewInfo to build info.
+func WritePaginatedInfo[T any](w http.ResponseWriter, results T, info paging.Info, title, detail string) {
 	Write(w, http.StatusOK, DxPagedResponse[T]{
 		Type:           URNRsSuccess,
 		Title:          title,
@@ -104,7 +104,7 @@ func (sw *ServiceWriter) Success(w http.ResponseWriter, result any, title, detai
 }
 
 // PaginatedInfo writes a 200 OK response with page-based pagination.
-func (sw *ServiceWriter) PaginatedInfo(w http.ResponseWriter, result any, info pagination.Info, title, detail string) {
+func (sw *ServiceWriter) PaginatedInfo(w http.ResponseWriter, result any, info paging.Info, title, detail string) {
 	Write(w, http.StatusOK, DxPagedResponse[any]{
 		Type:           sw.prefix + "success",
 		Title:          title,

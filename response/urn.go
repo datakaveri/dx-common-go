@@ -2,14 +2,14 @@ package response
 
 // URN constants for the resource server namespace.
 const (
-	URNRsSuccess        = "urn:dx:rs:success"
-	URNRsCreated        = "urn:dx:rs:created"
-	URNRsNotFound       = "urn:dx:rs:ResourceNotFound"
-	URNRsInvalidParam   = "urn:dx:rs:InvalidParamValue"
-	URNRsUnauthorized   = "urn:dx:rs:Unauthorized"
-	URNRsForbidden      = "urn:dx:rs:Forbidden"
-	URNRsInternal       = "urn:dx:rs:InternalServerError"
-	URNRsConflict       = "urn:dx:rs:ResourceAlreadyExists"
+	URNRsSuccess      = "urn:dx:rs:success"
+	URNRsCreated      = "urn:dx:rs:created"
+	URNRsNotFound     = "urn:dx:rs:ResourceNotFound"
+	URNRsInvalidParam = "urn:dx:rs:InvalidParamValue"
+	URNRsUnauthorized = "urn:dx:rs:Unauthorized"
+	URNRsForbidden    = "urn:dx:rs:Forbidden"
+	URNRsInternal     = "urn:dx:rs:InternalServerError"
+	URNRsConflict     = "urn:dx:rs:ResourceAlreadyExists"
 )
 
 // URN constants for the auth/catalogue service namespace (as/auth-server).
@@ -27,14 +27,14 @@ const (
 
 // URN constants for the catalogue service namespace.
 const (
-	URNCatSuccess  = "urn:dx:cat:success"
-	URNCatCreated  = "urn:dx:cat:created"
+	URNCatSuccess = "urn:dx:cat:success"
+	URNCatCreated = "urn:dx:cat:created"
 )
 
 // URN constants for the ACL service namespace.
 const (
-	URNAclSuccess  = "urn:dx:acl:success"
-	URNAclCreated  = "urn:dx:acl:created"
+	URNAclSuccess = "urn:dx:acl:success"
+	URNAclCreated = "urn:dx:acl:created"
 )
 
 // URN constants for the authorization (PDP) service namespace.
@@ -45,26 +45,26 @@ const (
 
 // URN constants for the marketplace service namespace.
 const (
-	URNDmpSuccess  = "urn:dx:dmp:success"
-	URNDmpCreated  = "urn:dx:dmp:created"
+	URNDmpSuccess = "urn:dx:dmp:success"
+	URNDmpCreated = "urn:dx:dmp:created"
 )
 
 // URN constants for the community layer namespace.
 const (
-	URNCommunitySuccess    = "urn:dx:community:success"
-	URNCommunityCreated    = "urn:dx:community:created"
-	URNCommunityNotFound   = "urn:dx:community:ResourceNotFound"
-	URNCommunityConflict   = "urn:dx:community:ResourceAlreadyExists"
-	URNCommunityForbidden  = "urn:dx:community:Forbidden"
-	URNCommunityInternal   = "urn:dx:community:InternalServerError"
+	URNCommunitySuccess   = "urn:dx:community:success"
+	URNCommunityCreated   = "urn:dx:community:created"
+	URNCommunityNotFound  = "urn:dx:community:ResourceNotFound"
+	URNCommunityConflict  = "urn:dx:community:ResourceAlreadyExists"
+	URNCommunityForbidden = "urn:dx:community:Forbidden"
+	URNCommunityInternal  = "urn:dx:community:InternalServerError"
 )
 
 // URN constants for the files service namespace.
 const (
-	URNFilesSuccess    = "urn:dx:files:success"
-	URNFilesCreated    = "urn:dx:files:created"
-	URNFilesNotFound   = "urn:dx:files:ResourceNotFound"
-	URNFilesConflict   = "urn:dx:files:ResourceAlreadyExists"
-	URNFilesForbidden  = "urn:dx:files:Forbidden"
-	URNFilesInternal   = "urn:dx:files:InternalServerError"
+	URNFilesSuccess   = "urn:dx:files:success"
+	URNFilesCreated   = "urn:dx:files:created"
+	URNFilesNotFound  = "urn:dx:files:ResourceNotFound"
+	URNFilesConflict  = "urn:dx:files:ResourceAlreadyExists"
+	URNFilesForbidden = "urn:dx:files:Forbidden"
+	URNFilesInternal  = "urn:dx:files:InternalServerError"
 )

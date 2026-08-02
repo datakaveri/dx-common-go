@@ -100,7 +100,7 @@ func TestNotifier_ValidationErrors(t *testing.T) {
 	cases := []Request{
 		{TemplateType: TemplateTypePath, TemplateStructure: "x", IsCreated: true}, // no consumer
 		{ConsumerUserID: "u", TemplateType: "BOGUS", TemplateStructure: "x"},      // bad type
-		{ConsumerUserID: "u", TemplateType: TemplateTypePath},                      // no structure
+		{ConsumerUserID: "u", TemplateType: TemplateTypePath},                     // no structure
 	}
 	for i, req := range cases {
 		if err := n.Send(context.Background(), req); err == nil {

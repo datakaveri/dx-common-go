@@ -1,11 +1,11 @@
 // Package resolver is a single auth middleware that establishes the request
 // subject from one of two sources:
 //
-//   1. HMAC-signed X-Subject-* headers (the "gateway path") — verified via
-//      dx-common-go/transport/headers. Trusted because only the gateway knows
-//      the shared secret.
-//   2. Authorization: Bearer <jwt> (the "direct path") — verified against
-//      Keycloak's JWKS by dx-common-go/auth/jwt.
+//  1. HMAC-signed X-Subject-* headers (the "gateway path") — verified via
+//     dx-common-go/transport/headers. Trusted because only the gateway knows
+//     the shared secret.
+//  2. Authorization: Bearer <jwt> (the "direct path") — verified against
+//     Keycloak's JWKS by dx-common-go/auth/jwt.
 //
 // HMAC is tried first. If a signature header is present BUT invalid, the
 // request is rejected — falling through to JWT in that case would let a

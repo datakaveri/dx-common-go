@@ -4,7 +4,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/datakaveri/dx-common-go/pagination"
+	"github.com/datakaveri/dx-common-go/platform/paging"
 )
 
 // TestEnvelopeWireContract pins the exact JSON every DX client parses.
@@ -34,7 +34,7 @@ func TestEnvelopeWireContract(t *testing.T) {
 		{
 			name: "paginated",
 			write: func(w *httptest.ResponseRecorder) {
-				sw.PaginatedInfo(w, []string{"a"}, pagination.NewInfo(1, 20, 42), "Success", "")
+				sw.PaginatedInfo(w, []string{"a"}, paging.NewInfo(1, 20, 42), "Success", "")
 			},
 			want: `{"type":"urn:dx:acl:success","title":"Success","result":["a"],` +
 				`"paginationInfo":{"page":1,"size":20,"totalCount":42,"totalPages":3,"hasNext":true,"hasPrevious":false}}`,

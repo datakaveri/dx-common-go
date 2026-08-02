@@ -26,6 +26,9 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
+  # The depguard rules in .golangci.yml are not style — they are how the
+  # platform's layering and driver containment are enforced. A violation must
+  # fail the build, not appear in a review comment.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -35,9 +38,10 @@ jobs:
           go-version: "1.25"
           cache: true
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # action v7+ is required for the v2 config format .golangci.yml uses.
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
 
   # The examples/ module is a separate Go module (its own go.mod), so the

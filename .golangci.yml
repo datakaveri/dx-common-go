@@ -2,34 +2,132 @@
 # Run: golangci-lint run ./...
 # Recommended in CI for every dx Go service — gosec in particular continuously
 # flags the auth/crypto class of issues (e.g. the HMAC blank-id hardening).
+#
+# The depguard rules below are not style: they are the ENFORCEMENT MECHANISM for
+# the platform's layering. See claude-docs/PLATFORM-ARCHITECTURE.md §6. Driver
+# containment that lives only in a document decays — 23 exported pgx sites and a
+# `type Delivery = amqp.Delivery` alias are what that decay looked like here.
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
   enable:
-    - govet
-    - staticcheck
-    - errcheck      # unchecked errors (esp. on writes/close)
-    - gosec         # security: weak crypto, unhandled secrets, SQL building
-    - ineffassign
-    - unused
+    - bodyclose
+    - contextcheck
+    - depguard
+    - gosec
     - misspell
-    - bodyclose     # leaked http.Response bodies
-    - rowserrcheck  # missing rows.Err() after pgx/sql iteration
-    - contextcheck  # context propagation
+    - rowserrcheck
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        - G115
+    depguard:
+      rules:
+        # ── Driver containment ────────────────────────────────────────────
+        # These apply ONLY under platform/. The legacy tree still imports all
+        # three legitimately and is being retired wave by wave; constraining it
+        # now would just produce noise nobody can act on.
 
-linters-settings:
-  gosec:
-    excludes:
-      - G115  # integer overflow conversion — noisy on intentional int/int64 casts
-  errcheck:
-    check-type-assertions: true
+        # gin leaves the platform entirely. The handler signature is
+        # func(ctx, Req) (Res, error) and the router backend is reached through
+        # http.HandlerFunc, so no platform package has a reason to know which
+        # router is in use. Previously: 7 gin twins of chi/net-http APIs,
+        # including *gin.Context inside the error taxonomy.
+        platform-no-web-framework:
+          files:
+            - "**/platform/**"
+          deny:
+            - pkg: github.com/gin-gonic/gin
+              desc: "platform code is framework-neutral: handlers are func(ctx, Req) (Res, error) and routes are http.HandlerFunc. See PLATFORM-ARCHITECTURE.md §4.2."
 
+        # amqp091-go is importable only from the one adapter that implements
+        # events.Bus. The `type Delivery = amqp.Delivery` alias put a driver
+        # struct in every consumer's Handler signature, which is why 8 services
+        # import amqp091-go directly today.
+        platform-amqp-only-in-adapter:
+          files:
+            - "**/platform/**"
+            - "!**/platform/events/amqp/**"
+          deny:
+            - pkg: github.com/rabbitmq/amqp091-go
+              desc: "the broker is reached through platform/events.Bus; only platform/events/amqp may import the driver. See PLATFORM-ARCHITECTURE.md §5.4."
+
+        # pgx is contained, not hidden: platform/database/sql implements over
+        # it, and platform/database/sql/pgx is the deliberate, greppable escape
+        # hatch. The goal is locality — "who depends on pgx?" should be one
+        # grep, not an audit of 23 exported sites across 6 packages.
+        platform-pgx-containment:
+          files:
+            - "**/platform/**"
+            - "!**/platform/database/sql/**"
+          deny:
+            - pkg: github.com/jackc/pgx
+              desc: "use platform/database/sql (DB, Tx, Repo[T]); for driver-specific work import platform/database/sql/pgx explicitly. See PLATFORM-ARCHITECTURE.md §7.1."
+
+        # Redis is fully hidden — platform/cache is the only surface. A driver
+        # sentinel (redis.Nil) leaking into cache.GetJSON's contract is the
+        # clearest example in this repo of a leak becoming an API.
+        platform-redis-only-in-cache:
+          files:
+            - "**/platform/**"
+            - "!**/platform/cache/**"
+          deny:
+            - pkg: github.com/redis/go-redis
+              desc: "use platform/cache (Cache, NS, Mutex, Limiter); Redis is an implementation detail. See PLATFORM-ARCHITECTURE.md §5.2."
+
+        # ── Layering ──────────────────────────────────────────────────────
+        # L0 is the kernel: it may import stdlib and nothing else from the
+        # platform. This is what keeps errors/paging/config/identity free of
+        # the cycles that put *gin.Context into the error package.
+        platform-l0-kernel-is-leaf:
+          files:
+            - "**/platform/errors/**"
+            - "**/platform/paging/**"
+            - "**/platform/validation/**"
+            - "**/platform/security/identity/**"
+            # Implementation only. External test packages (package foo_test)
+            # legitimately import the package under test.
+            - "!$test"
+          deny:
+            - pkg: github.com/datakaveri/dx-common-go/platform
+              desc: "L0 kernel packages are leaves: they may import stdlib and third-party utilities, but nothing else from platform/. See PLATFORM-ARCHITECTURE.md §6."
+
+        # bootstrap (L3) is the composition root. Nothing may import it —
+        # that is what makes it safe for it to import everything else.
+        platform-nothing-imports-bootstrap:
+          files:
+            - "**/platform/**"
+            - "!**/platform/bootstrap/**"
+          deny:
+            - pkg: github.com/datakaveri/dx-common-go/platform/bootstrap
+              desc: "bootstrap is the composition root (L3): it imports the platform, never the reverse. See PLATFORM-ARCHITECTURE.md §6."
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - bodyclose
+          - errcheck
+          - gosec
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-rules:
-    # Test helpers frequently ignore errors deliberately.
-    - path: _test\.go
-      linters: [errcheck, gosec, bodyclose]
   max-issues-per-linter: 0
   max-same-issues: 0
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

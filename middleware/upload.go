@@ -9,8 +9,8 @@ import (
 
 // UploadConfig controls file upload limits
 type UploadConfig struct {
-	MaxFileSize      int64  // Maximum file size in bytes
-	MaxMemory        int64  // Maximum memory to use before temp file
+	MaxFileSize      int64    // Maximum file size in bytes
+	MaxMemory        int64    // Maximum memory to use before temp file
 	AllowedMimeTypes []string // Allowed MIME types (empty = allow all)
 }
 
