@@ -261,3 +261,58 @@ func TestAuthSpec_ZeroValueIsSafe(t *testing.T) {
 		t.Errorf("status = %d; the zero AuthSpec must enforce authentication", rec.Code)
 	}
 }
+
+// TestRouter_RecoversFromHandlerPanic.
+//
+// The router had NO panic recovery in its first cut — found when migrating
+// dx-registry-go, whose route test panicked on a nil service and took the test
+// binary with it. In production that is worse: one nil dereference in one
+// handler kills every in-flight request on the replica, because Go's default
+// response to an unrecovered panic is to crash the process.
+func TestRouter_RecoversFromHandlerPanic(t *testing.T) {
+	boom := httpx.Handle(func(context.Context, httpx.None) (map[string]string, error) {
+		var m map[string]string
+		_ = m["key"]           // fine
+		var p *struct{ N int } //nolint:staticcheck // deliberate nil deref
+		_ = p.N                // panics
+		return nil, nil
+	}, httpx.WithURNs(urns))
+
+	r := httpx.NewRouter(
+		httpx.RouterSpec{Base: "/", URNs: urns,
+			Auth: httpx.AuthSpec{Authenticate: authAs(identity.Subject{ID: "u-1"})}},
+		httpx.Routes("", httpx.GET("/boom", boom)),
+	)
+
+	rec := get(r, "/boom") // must not panic out of ServeHTTP
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	// The panic message and stack go to the log, never to the client: a stack
+	// trace names internal paths and package layout.
+	if bodyContains(rec.Body.String(), "nil pointer") || bodyContains(rec.Body.String(), ".go:") {
+		t.Errorf("panic detail leaked into the response: %s", rec.Body.String())
+	}
+}
+
+// TestRouter_PanicInMiddlewareIsAlsoRecovered: recovery runs first, so it wraps
+// every other middleware, not just the handlers.
+func TestRouter_PanicInMiddlewareIsAlsoRecovered(t *testing.T) {
+	r := httpx.NewRouter(
+		httpx.RouterSpec{
+			Base: "/", URNs: urns,
+			Auth: httpx.AuthSpec{Authenticate: authAs(identity.Subject{ID: "u-1"})},
+			Middleware: []func(http.Handler) http.Handler{
+				func(http.Handler) http.Handler {
+					return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+						panic("middleware exploded")
+					})
+				},
+			},
+		},
+		httpx.Routes("", httpx.GET("/x", okHandler())),
+	)
+	if rec := get(r, "/x"); rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+}

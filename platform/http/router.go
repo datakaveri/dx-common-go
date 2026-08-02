@@ -106,6 +106,10 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 		return chi.URLParam(req, name)
 	})
 
+	// Recovery FIRST, so it wraps every other middleware and every handler. A
+	// panic in a later middleware is just as fatal as one in a handler.
+	r.Use(recoverPanics(spec.Logger))
+
 	for _, mw := range spec.Middleware {
 		r.Use(mw)
 	}

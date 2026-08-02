@@ -229,6 +229,12 @@ func writeResult[Res any](w http.ResponseWriter, res Res, o *options) {
 func (c Created[T]) createdValue() any   { return c.Value }
 func (a Accepted[T]) acceptedValue() any { return a.Value }
 
+// writeJSON encodes v to w. Extracted so the panic recovery path can render a
+// Problem without importing the encoder itself.
+func writeJSON(w http.ResponseWriter, v any) error {
+	return json.NewEncoder(w).Encode(v)
+}
+
 func writeError(w http.ResponseWriter, r *http.Request, err error, o *options) {
 	if IsClientGone(err) {
 		// The socket is closed. Writing is pointless and logging at error level
