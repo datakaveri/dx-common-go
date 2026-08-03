@@ -17,7 +17,30 @@ import (
 //
 // One type replacing the `type AuthConfig struct{SharedSecret string; JWT ...}`
 // currently redeclared in 17 service files.
+// Mode selects how a missing credential is treated.
+//
+// The zero value is Required, deliberately: a service that forgets to set this
+// gets the strict resolver rather than an open one. A bool named "Optional"
+// would default to false and read as a decision nobody made.
+type Mode int
+
+const (
+	// Required rejects a request with no verified caller.
+	Required Mode = iota
+	// Optional serves an anonymous request, but still REJECTS one whose
+	// credential is present and invalid.
+	//
+	// That distinction is the whole point. Falling through to anonymous on a
+	// bad credential hands an attacker a downgrade: corrupt your own token and
+	// receive the anonymous view of an endpoint that would otherwise have
+	// rejected you outright.
+	Optional
+)
+
 type AuthConfig struct {
+	// Mode controls whether an ABSENT credential is tolerated. It never
+	// tolerates an invalid one.
+	Mode Mode
 	// HMACSecret verifies the gateway-signed X-Subject-* identity headers. This
 	// is the primary path: the gateway is the single PEP, and everything behind
 	// it trusts headers it signed.
@@ -50,13 +73,45 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 	})
 
 	return func(next http.Handler) http.Handler {
-		return resolver(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		publish := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if sub, ok := SubjectFrom(r); ok {
 				r = r.WithContext(identity.With(r.Context(), sub))
 			}
 			next.ServeHTTP(w, r)
-		}))
+		})
+		inner := resolver(publish)
+
+		if cfg.Mode == Required {
+			return inner
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Optional: only run the resolver when a credential is actually
+			// present. Running it unconditionally would reject the anonymous
+			// request this mode exists to serve.
+			//
+			// A credential that IS present goes through the full resolver, so
+			// an invalid one still fails — absence is tolerated, invalidity is
+			// not.
+			if hasCredential(r, cfg.HMACSecret != "") {
+				inner.ServeHTTP(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
+}
+
+// hasCredential reports whether the request carries any credential the
+// resolver would act on.
+//
+// It must consider EVERY form the resolver accepts. Missing one — Basic for
+// app credentials, say — silently anonymises a caller who did authenticate,
+// which is the failure mode optional auth is most likely to produce.
+func hasCredential(r *http.Request, hmacEnabled bool) bool {
+	if hmacEnabled && r.Header.Get(dxheaders.HdrSubjectSig) != "" {
+		return true
+	}
+	return r.Header.Get("Authorization") != ""
 }
 
 // SubjectFrom converts whatever identity the legacy resolver left on the

@@ -37,6 +37,13 @@ type Route struct {
 	// rather than by path convention: a route that is public by accident is the
 	// kind of mistake nobody notices in review.
 	Public bool
+	// Optional serves anonymous callers but still resolves identity when one
+	// is supplied, so the handler can widen its result.
+	//
+	// Distinct from Public, which means "no identity expected at all" — a JWKS
+	// document or a health probe. Conflating them is how a public read ends up
+	// anonymous even for a signed-in caller.
+	Optional bool
 	// OpID is the OpenAPI operationId, used by AssertNoDrift.
 	OpID string
 }
@@ -162,6 +169,13 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 			}
 			for _, rt := range protected {
 				h := rt.Handler
+				if rt.Optional {
+					// No subject gate: anonymity is the point. The resolver
+					// still ran, so an identified caller reaches the handler
+					// with their Subject on the context.
+					pr.Method(rt.Method, rt.Path, h)
+					continue
+				}
 				if len(rt.Roles) > 0 {
 					h = requireRoles(h, rt.Roles, spec.Mappers, spec.Logger)
 				} else if !spec.Auth.AllowAnonymous {
@@ -242,8 +256,18 @@ func Roles(roles ...string) RouteOption {
 	return func(r *Route) { r.Roles = roles }
 }
 
-// Public marks a route as unauthenticated.
+// Public marks a route as unauthenticated — no identity is resolved or
+// expected. For a route that should serve anonymous callers but still see a
+// caller when one is present, use Optional.
 func Public() RouteOption { return func(r *Route) { r.Public = true } }
+
+// Optional marks a route that serves anonymous callers AND sees a verified
+// caller when one is supplied.
+//
+// Its handler must take a request embedding httpx.OptionalActor and be built
+// with HandleOptional; Handle rejects such a request type at construction, so
+// a mismatch fails at boot rather than leaking at runtime.
+func Optional() RouteOption { return func(r *Route) { r.Optional = true } }
 
 // OpID records the OpenAPI operationId, for the spec-drift test.
 func OpID(id string) RouteOption { return func(r *Route) { r.OpID = id } }

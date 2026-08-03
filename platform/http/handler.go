@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 
 	"go.uber.org/zap"
 
@@ -65,6 +66,17 @@ func resolve(opts []Option) *options {
 //
 // Every step a handler repeats today happens here exactly once.
 func Handle[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc {
+	// A request embedding OptionalActor on a Handle route would be served the
+	// adapter's 401 before the handler ran, defeating the point of the type.
+	// Caught at construction, in Wire, rather than at runtime.
+	mustEmbedOptionalActor[Req](false, "Handle")
+	return handle(h, opts...)
+}
+
+// handle is the shared adapter core. Handle and HandleOptional differ only in
+// which request types they accept and what headers they add, so the actual
+// decode/invoke/render path exists once.
+func handle[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc {
 	o := resolve(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, err := bind[Req](r)
@@ -272,4 +284,68 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// HandleOptional adapts a handler whose request embeds OptionalActor — an
+// endpoint that serves anonymous callers and widens for identified ones.
+//
+// It PANICS at construction if Req does not embed OptionalActor, and Handle
+// panics if Req DOES. That pairing is what makes the contract type-safe
+// without asking any handler to check anything:
+//
+//   - a handler embedding Actor cannot be reached anonymously, because Handle
+//     lets the adapter 401 first;
+//   - a handler embedding OptionalActor cannot forget it might be anonymous,
+//     because the type says so and Authenticated must be consulted to use the
+//     subject.
+//
+// Routes are built in Wire, so a mismatch is a BOOT failure naming the
+// handler, not a runtime leak discovered later.
+//
+// It also sets cache headers. An optional-auth endpoint returns different
+// bodies for the same URL, so any shared cache keying on URL alone would serve
+// one caller's widened results to a stranger. That is the highest-severity
+// pitfall of this feature and it is handled here rather than left to each
+// service to remember.
+func HandleOptional[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc {
+	mustEmbedOptionalActor[Req](true, "HandleOptional")
+	inner := handle(h, opts...)
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Authorization")
+		w.Header().Add("Vary", "X-Subject-Id")
+		inner(w, r)
+	}
+}
+
+// mustEmbedOptionalActor enforces the Handle/HandleOptional pairing.
+func mustEmbedOptionalActor[Req any](want bool, fn string) {
+	var zero Req
+	t := reflect.TypeOf(zero)
+	if t == nil || t.Kind() != reflect.Struct {
+		if want {
+			panic(fn + ": request type must be a struct embedding httpx.OptionalActor")
+		}
+		return
+	}
+	got := embedsOptionalActor(t)
+	switch {
+	case want && !got:
+		panic(fn + ": " + t.String() + " does not embed httpx.OptionalActor — use Handle, or embed it")
+	case !want && got:
+		panic(fn + ": " + t.String() + " embeds httpx.OptionalActor — use HandleOptional")
+	}
+}
+
+func embedsOptionalActor(t reflect.Type) bool {
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Type == reflect.TypeOf(OptionalActor{}) {
+			return true
+		}
+		if f.Anonymous && f.Type.Kind() == reflect.Struct && embedsOptionalActor(f.Type) {
+			return true
+		}
+	}
+	return false
 }

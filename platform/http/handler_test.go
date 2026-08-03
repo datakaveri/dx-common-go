@@ -410,7 +410,7 @@ func TestOptionalActor(t *testing.T) {
 		httpx.OptionalActor
 		Q string `query:"q"`
 	}
-	h := httpx.Handle(func(_ context.Context, in req) (map[string]any, error) {
+	h := httpx.HandleOptional(func(_ context.Context, in req) (map[string]any, error) {
 		return map[string]any{"auth": in.Authenticated, "id": in.ID, "q": in.Q}, nil
 	}, httpx.WithURNs("cat"))
 
@@ -438,4 +438,55 @@ func TestOptionalActor(t *testing.T) {
 			t.Errorf("body = %s, want auth=true and the subject id", body)
 		}
 	})
+}
+
+// The pairing is what makes optional auth type-safe, so it must actually fire.
+// A mismatch is a BOOT failure naming the handler, not a runtime leak.
+func TestHandleConstructorsRejectMismatchedRequestTypes(t *testing.T) {
+	type optionalReq struct{ httpx.OptionalActor }
+	type strictReq struct{ httpx.Actor }
+
+	t.Run("Handle rejects an OptionalActor request", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("Handle accepted an OptionalActor request; the adapter " +
+					"would 401 before the handler ran, defeating the type")
+			}
+		}()
+		_ = httpx.Handle(func(context.Context, optionalReq) (string, error) { return "", nil })
+	})
+
+	t.Run("HandleOptional rejects an Actor request", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Error("HandleOptional accepted an Actor request; the route would " +
+					"serve anonymous callers to a handler that assumes a caller")
+			}
+		}()
+		_ = httpx.HandleOptional(func(context.Context, strictReq) (string, error) { return "", nil })
+	})
+
+	t.Run("matched pairs are accepted", func(t *testing.T) {
+		_ = httpx.Handle(func(context.Context, strictReq) (string, error) { return "", nil })
+		_ = httpx.HandleOptional(func(context.Context, optionalReq) (string, error) { return "", nil })
+	})
+}
+
+// An optional-auth response varies by caller, so a shared cache keying on URL
+// alone would serve one caller's widened results to a stranger.
+func TestHandleOptionalSetsCacheHeaders(t *testing.T) {
+	type req struct{ httpx.OptionalActor }
+	h := httpx.HandleOptional(func(context.Context, req) (string, error) { return "ok", nil },
+		httpx.WithURNs("cat"))
+
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if got := rec.Header().Get("Cache-Control"); got != "private, no-store" {
+		t.Errorf("Cache-Control = %q, want private, no-store", got)
+	}
+	vary := rec.Header().Values("Vary")
+	if len(vary) < 2 {
+		t.Errorf("Vary = %v, want it to name both the bearer and the subject header", vary)
+	}
 }
