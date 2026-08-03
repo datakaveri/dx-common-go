@@ -185,6 +185,15 @@ type Server struct {
 // InternalAuth is the shared secret the gateway signs identity headers with.
 type InternalAuth struct {
 	SharedSecret string `mapstructure:"shared_secret"`
+	// HeaderMaxAge bounds how stale a signed identity header may be — the
+	// replay window enforced by transport/headers.Verify. Zero uses that
+	// package's 60s default.
+	//
+	// It lives here rather than in the gateway's own config because it is a
+	// VERIFIER concern: every upstream that checks a signed header enforces
+	// this window, and today none of them can configure it. The signer and the
+	// verifiers must agree, so it has to be expressible on both sides.
+	HeaderMaxAge time.Duration `mapstructure:"header_max_age"`
 }
 
 // OpenAPI controls spec validation and the docs UI.
@@ -199,16 +208,25 @@ type OpenAPI struct {
 // before the service's own, so a service overrides only what differs.
 func PlatformDefaults() map[string]any {
 	return map[string]any{
-		"log_level":                  "info",
-		"server.port":                8080,
-		"server.read_timeout":        "15s",
-		"server.write_timeout":       "30s",
-		"server.idle_timeout":        "120s",
-		"server.shutdown_timeout":    "20s",
-		"server.max_body_bytes":      1 << 20, // 1 MiB
-		"schema_mode":                "migrate",
-		"openapi.swagger_ui_enabled": true,
-		"openapi.swagger_ui_path":    "/docs",
+		"log_level":               "info",
+		"server.port":             8080,
+		"server.read_timeout":     "15s",
+		"server.write_timeout":    "30s",
+		"server.idle_timeout":     "120s",
+		"server.shutdown_timeout": "20s",
+		"server.max_body_bytes":   1 << 20, // 1 MiB
+		"schema_mode":             "migrate",
+		// Declared with empty defaults so the keys exist in AllKeys and are
+		// therefore env-bindable. Viper only binds a variable for a key it
+		// already knows, and a key present ONLY in the struct — absent from
+		// both the defaults and the config file — is invisible to it. That is
+		// how a secret supplied purely through the environment silently binds
+		// to nothing, which is the most confusing possible failure in a
+		// container.
+		"internal_auth.shared_secret":  "",
+		"internal_auth.header_max_age": 0,
+		"openapi.swagger_ui_enabled":   true,
+		"openapi.swagger_ui_path":      "/docs",
 		// Validation defaults ON: an unvalidated request is how a spec and its
 		// implementation drift apart without anyone noticing.
 		"openapi.validate_requests": true,
