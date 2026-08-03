@@ -55,6 +55,18 @@ linters:
             - pkg: github.com/rabbitmq/amqp091-go
               desc: "the broker is reached through platform/events.Bus; only platform/events/amqp may import the driver. See PLATFORM-ARCHITECTURE.md §5.4."
 
+        # go-redis is importable only from the one store that implements
+        # cache.Store. Everything else depends on cache.Scope and cannot tell
+        # what the backend is — which is what lets a service run on the
+        # in-memory store in tests, or with no Redis at all.
+        platform-redis-only-in-adapter:
+          files:
+            - "**/platform/**"
+            - "!**/platform/cache/redis/**"
+          deny:
+            - pkg: github.com/redis/go-redis/v9
+              desc: "the cache is reached through platform/cache.Scope; only platform/cache/redis may import the driver."
+
         # pgx is contained, not hidden: platform/database/sql implements over
         # it, and platform/database/sql/pgx is the deliberate, greppable escape
         # hatch. The goal is locality — "who depends on pgx?" should be one
