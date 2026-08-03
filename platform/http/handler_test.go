@@ -401,3 +401,41 @@ func TestHandlerIsCallableWithoutHTTP(t *testing.T) {
 		t.Errorf("err = %v, want a validation error", err)
 	}
 }
+
+// TestOptionalActor covers the anonymous-but-enriched contract: the same route
+// must serve a caller and a stranger, and the handler must be able to tell them
+// apart without the adapter rejecting either.
+func TestOptionalActor(t *testing.T) {
+	type req struct {
+		httpx.OptionalActor
+		Q string `query:"q"`
+	}
+	h := httpx.Handle(func(_ context.Context, in req) (map[string]any, error) {
+		return map[string]any{"auth": in.Authenticated, "id": in.ID, "q": in.Q}, nil
+	}, httpx.WithURNs("cat"))
+
+	t.Run("anonymous is served, not rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodGet, "/?q=x", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — an anonymous read must not 401", rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, `"auth":false`) {
+			t.Errorf("body = %s, want auth=false", body)
+		}
+	})
+
+	t.Run("verified caller is carried through", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/?q=x", nil)
+		r = r.WithContext(identity.With(r.Context(), identity.Subject{ID: "u-1"}))
+		rec := httptest.NewRecorder()
+		h(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `"auth":true`) || !strings.Contains(body, `"id":"u-1"`) {
+			t.Errorf("body = %s, want auth=true and the subject id", body)
+		}
+	})
+}

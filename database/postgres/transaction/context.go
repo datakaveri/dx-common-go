@@ -26,3 +26,19 @@ func TxFromContext(ctx context.Context) (pgx.Tx, bool) {
 	tx, ok := ctx.Value(txContextKey{}).(pgx.Tx)
 	return tx, ok
 }
+
+// WithTx stashes tx on ctx under this package's ambient-transaction key, so a
+// repository calling TxFromContext binds to it.
+//
+// TRANSITIONAL, and the only reason it is exported. A service migrating onto
+// platform/database/sql runs its transactions through sql.Manager, which
+// propagates under its OWN context key — so repositories still reading
+// TxFromContext would not see it and would quietly run their writes on the
+// pool instead, splitting a transaction with no error raised. Bridging the two
+// keys for the duration of the migration is what keeps that atomic.
+//
+// Call it ONLY with a transaction you actually began. Putting an arbitrary
+// value here makes every repository downstream believe it is in a transaction.
+func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
+	return context.WithValue(ctx, txContextKey{}, tx)
+}

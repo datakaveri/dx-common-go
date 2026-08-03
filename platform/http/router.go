@@ -129,7 +129,16 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 		if path == "" {
 			path = "/docs"
 		}
-		r.Mount(path, spec.Docs)
+		// StripPrefix, so the handler sees paths RELATIVE to where it is
+		// mounted — "/" and "/openapi.json" rather than "/docs" and
+		// "/docs/openapi.json".
+		//
+		// chi's Mount alone does not do this: it records the remainder on the
+		// route context but leaves r.URL.Path untouched, so any handler that
+		// routes on URL.Path (a http.ServeMux, openapi.Handler, anything not
+		// chi) matched nothing and 404'd on every docs route. A mounted chi
+		// sub-router is unaffected — it reads the route context, not the URL.
+		r.Mount(path, http.StripPrefix(strings.TrimSuffix(path, "/"), spec.Docs))
 	}
 
 	base := spec.Base

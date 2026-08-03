@@ -27,6 +27,25 @@ import (
 // reaches the handler, the caller was verified.
 type Actor struct{ identity.Subject }
 
+// OptionalActor is the caller when there may not be one.
+//
+// Embedding Actor makes 401 the adapter's job; embedding this instead makes
+// anonymity a first-class, INSPECTED state: Authenticated is false and Subject
+// is zero. It exists for endpoints that serve everyone but serve more to a
+// known caller — a public catalogue that widens its result set once it knows
+// who is asking.
+//
+// The two must stay distinct types. A single "maybe empty" Actor would make
+// every handler's 401 depend on remembering to check a bool, and the one that
+// forgot would leak. Here the type itself says which contract applies.
+type OptionalActor struct {
+	identity.Subject
+	// Authenticated reports whether a verified caller was present. Check this
+	// rather than testing Subject.ID against "" — the intent is then visible at
+	// the call site and in review.
+	Authenticated bool
+}
+
 // None is the empty request, for handlers that take no input.
 type None struct{}
 
@@ -55,6 +74,16 @@ func SetPathValueFunc(f PathValueFunc) {
 		pathValue = f
 	}
 }
+
+// PathValue reports a path parameter's value.
+//
+// Tag binding covers this for ordinary request types; this is for a Binder,
+// which replaces tag binding wholesale and so must read its own path
+// parameters. Without it a self-binding request on a route like
+// /organisations/{id}/members cannot see the id at all, and the only
+// alternatives are re-parsing the URL by hand or importing the router backend
+// into the service — both of which defeat the point of hiding it.
+func PathValue(r *http.Request, name string) string { return pathValue(r, name) }
 
 // maxBodyBytes caps a request body when the caller has not already capped it.
 // Absent fleet-wide today, which makes every JSON endpoint a memory-exhaustion
@@ -102,6 +131,15 @@ func bindStruct(v reflect.Value, r *http.Request) error {
 				return err // ToProblem maps ErrNoSubject to 401
 			}
 			value.Set(reflect.ValueOf(Actor{Subject: sub}))
+			continue
+		}
+
+		// Embedded OptionalActor: fill from the subject if one is present, and
+		// leave it zero otherwise. Never an error — absence is the point.
+		if field.Anonymous && field.Type == reflect.TypeOf(OptionalActor{}) {
+			if sub, ok := identity.From(r.Context()); ok && sub.ID != "" {
+				value.Set(reflect.ValueOf(OptionalActor{Subject: sub, Authenticated: true}))
+			}
 			continue
 		}
 
@@ -200,7 +238,12 @@ func hasJSONField(t reflect.Type) bool {
 		if _, ok := f.Tag.Lookup("json"); ok {
 			return true
 		}
-		if f.Anonymous && f.Type.Kind() == reflect.Struct && f.Type != reflect.TypeOf(Actor{}) {
+		// The caller types carry no body fields; recursing into them would only
+		// find identity's own struct tags.
+		if f.Type == reflect.TypeOf(Actor{}) || f.Type == reflect.TypeOf(OptionalActor{}) {
+			continue
+		}
+		if f.Anonymous && f.Type.Kind() == reflect.Struct {
 			if hasJSONField(f.Type) {
 				return true
 			}

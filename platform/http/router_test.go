@@ -316,3 +316,37 @@ func TestRouter_PanicInMiddlewareIsAlsoRecovered(t *testing.T) {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
+
+// TestRouter_DocsSeeRelativePaths pins the mount contract: Docs is mounted AT
+// DocsPath, so the handler must see paths relative to it.
+//
+// chi's Mount records the remainder on the route context but leaves
+// r.URL.Path untouched, so before StripPrefix was added any handler routing on
+// URL.Path — an http.ServeMux, openapi.Handler, anything not chi — matched
+// nothing and 404'd on every docs route.
+func TestRouter_DocsSeeRelativePaths(t *testing.T) {
+	var got []string
+	docs := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	r := httpx.NewRouter(httpx.RouterSpec{
+		Base: "/", URNs: urns, Docs: docs, DocsPath: "/docs",
+	})
+
+	for _, path := range []string{"/docs", "/docs/openapi.json"} {
+		if rec := get(r, path); rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", path, rec.Code)
+		}
+	}
+	want := []string{"", "/openapi.json"}
+	if len(got) != len(want) {
+		t.Fatalf("handler saw %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("handler saw %q, want %q", got[i], want[i])
+		}
+	}
+}
