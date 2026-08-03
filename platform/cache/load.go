@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // GetOrLoad is cache-aside: return the cached value, or load it, store it and
@@ -150,4 +151,77 @@ func (g *singleflight) finish(key string, c *call) {
 	delete(g.m, key)
 	g.mu.Unlock()
 	c.wg.Done()
+}
+
+// GetOrLoadAhead is GetOrLoad with refresh-ahead: a value older than refreshAfter
+// is still SERVED, and a single background reload is kicked off.
+//
+// It exists for the expensive-and-hot case — a value that costs a second to
+// compute and is read constantly. Plain GetOrLoad makes whichever unlucky
+// request finds the expired key pay that second; this one never does.
+//
+// The value is wrapped so its load time travels with it, which is why entries
+// written by this function are not readable by a plain Get. That is deliberate:
+// mixing the two on one key would silently produce misses.
+//
+// The background reload uses a context DETACHED from the caller's, because the
+// request that triggered it returns immediately — an inherited context would be
+// cancelled the moment the response is written, so the refresh would never
+// complete and every subsequent request would trigger another.
+func GetOrLoadAhead[T any](
+	ctx context.Context,
+	s Scope,
+	key string,
+	refreshAfter time.Duration,
+	load func(context.Context) (T, error),
+) (T, error) {
+	var env envelope[T]
+	err := s.Get(ctx, key, &env)
+	if err == nil {
+		if time.Since(env.At) > refreshAfter {
+			// Detached, and deduplicated by singleflight, so a hot key
+			// under refresh does not spawn one goroutine per request.
+			go func() {
+				bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+				defer cancel()
+				_, _, _ = loaders.Do(s.Key(key)+"\x00refresh", func() (any, error) {
+					v, lerr := load(bg)
+					if lerr == nil {
+						_ = s.Set(bg, key, envelope[T]{Value: v, At: time.Now()})
+					}
+					return nil, lerr
+				})
+			}()
+		}
+		return env.Value, nil
+	}
+
+	v, err, _ := loaders.Do(s.Key(key), func() (any, error) {
+		loaded, lerr := load(ctx)
+		if lerr != nil {
+			return nil, lerr
+		}
+		_ = s.Set(ctx, key, envelope[T]{Value: loaded, At: time.Now()})
+		return loaded, nil
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	typed, ok := v.(T)
+	if !ok {
+		var zero T
+		return zero, errors.New("cache: concurrent load returned a different type for key " + s.Key(key))
+	}
+	return typed, nil
+}
+
+// refreshTimeout bounds a background reload. Without it a wedged loader leaks a
+// goroutine for the process's lifetime.
+const refreshTimeout = 30 * time.Second
+
+// envelope carries a value with the time it was loaded.
+type envelope[T any] struct {
+	Value T         `json:"v"`
+	At    time.Time `json:"at"`
 }

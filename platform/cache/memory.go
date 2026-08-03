@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +120,28 @@ func (m *Memory) Lock(ctx context.Context, key string, ttl time.Duration) (func(
 		m.mu.Unlock()
 		return nil
 	}, true, nil
+}
+
+// Incr atomically increments a counter under the store's own lock.
+func (m *Memory) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var n int64
+	if e, ok := m.items[key]; ok && !e.expired(now) {
+		// Counters are stored as their decimal text so the Store contract
+		// stays bytes-only and the Redis and memory encodings agree.
+		n, _ = strconv.ParseInt(string(e.val), 10, 64)
+	}
+	n++
+
+	exp := time.Time{}
+	if ttl > 0 {
+		exp = now.Add(ttl)
+	}
+	m.items[key] = entry{val: []byte(strconv.FormatInt(n, 10)), exp: exp}
+	return n, nil
 }
 
 // Close drops everything held. Safe to call more than once.

@@ -99,6 +99,13 @@ type Scope interface {
 	// concurrent loads in-process without a round trip.
 	Lock(ctx context.Context, key string, ttl time.Duration, fn func(context.Context) error) error
 
+	// Allow reports whether an action keyed by key is within limit for the
+	// current window, and how many remain. It is a fixed window, not a
+	// sliding one: cheap (one atomic op), predictable, and adequate for
+	// protecting a backend. It permits up to 2x limit across a window
+	// boundary — if that matters, this is the wrong primitive.
+	Allow(ctx context.Context, key string, limit int, window time.Duration) (allowed bool, remaining int, err error)
+
 	// Key renders the fully-qualified key, for logging and for the rare
 	// caller that must hand a real key to something outside this package.
 	Key(key string) string
@@ -116,6 +123,11 @@ type Store interface {
 	DeletePrefix(ctx context.Context, prefix string) error
 	// Lock acquires a non-blocking lock. acquired=false means held elsewhere.
 	Lock(ctx context.Context, key string, ttl time.Duration) (release func(context.Context) error, acquired bool, err error)
+	// Incr atomically increments a counter, setting ttl on first creation,
+	// and returns the new value. Atomicity is the whole requirement: a
+	// read-modify-write would let concurrent requests share a slot and
+	// silently exceed the limit under exactly the load a limiter exists for.
+	Incr(ctx context.Context, key string, ttl time.Duration) (int64, error)
 	Close() error
 }
 
@@ -231,6 +243,32 @@ func (s *scope) Lock(ctx context.Context, key string, ttl time.Duration, fn func
 		_ = release(rctx)
 	}()
 	return fn(ctx)
+}
+
+// Allow implements a fixed-window limiter.
+//
+// The window is derived from the clock rather than from first use, so every
+// replica agrees on the boundary without coordination — two gateway pods
+// limiting the same subject must not each grant a full quota.
+func (s *scope) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, int, error) {
+	if limit <= 0 {
+		return false, 0, nil
+	}
+	slot := time.Now().UnixNano() / int64(window)
+	windowKey := fmt.Sprintf("%s%s%d", s.Key(key), keySeparator, slot)
+
+	n, err := s.store.Incr(ctx, windowKey, window)
+	if err != nil {
+		// Fail OPEN. A limiter is a protection, not a gate: if the cache is
+		// down, refusing all traffic converts a cache outage into a total
+		// outage. Callers that need fail-closed must check err themselves.
+		return true, 0, err
+	}
+	remaining := limit - int(n)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return int(n) <= limit, remaining, nil
 }
 
 func (s *scope) Close() error { return s.store.Close() }

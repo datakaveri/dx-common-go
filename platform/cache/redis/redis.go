@@ -163,6 +163,24 @@ end
 return 0
 `)
 
+// Incr increments and sets the TTL on creation, in one round trip.
+//
+// EXPIRE is issued unconditionally in the pipeline rather than only on the
+// first increment: a counter that somehow lost its TTL would otherwise live
+// forever, and re-setting it on a fixed-window key is harmless because the key
+// name already changes each window.
+func (s *Store) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	pipe := s.c.TxPipeline()
+	n := pipe.Incr(ctx, key)
+	if ttl > 0 {
+		pipe.Expire(ctx, key, ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return n.Val(), nil
+}
+
 func (s *Store) Close() error { return s.c.Close() }
 
 // Check satisfies observability/health.Checker, so a service can register the

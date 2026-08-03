@@ -3,6 +3,7 @@ package cache_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -292,4 +293,115 @@ func TestLockExcludes(t *testing.T) {
 	if err := s.Lock(ctx, "j", time.Minute, func(context.Context) error { return nil }); err != nil {
 		t.Errorf("lock not released: %v", err)
 	}
+}
+
+func TestAllowEnforcesLimit(t *testing.T) {
+	c := newCache()
+	s := c.Namespace("rl")
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		ok, remaining, err := s.Allow(ctx, "sub-1", 3, time.Minute)
+		if err != nil {
+			t.Fatalf("allow: %v", err)
+		}
+		if !ok {
+			t.Fatalf("request %d denied while within the limit", i)
+		}
+		if want := 3 - i; remaining != want {
+			t.Errorf("request %d: remaining = %d, want %d", i, remaining, want)
+		}
+	}
+	ok, remaining, err := s.Allow(ctx, "sub-1", 3, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("the 4th request was allowed past a limit of 3")
+	}
+	if remaining != 0 {
+		t.Errorf("remaining = %d, want 0", remaining)
+	}
+}
+
+// Limits must be per-key, or one noisy subject throttles everyone.
+func TestAllowIsPerKey(t *testing.T) {
+	c := newCache()
+	s := c.Namespace("rl")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if ok, _, _ := s.Allow(ctx, "sub-1", 3, time.Minute); !ok {
+			t.Fatal("sub-1 exhausted early")
+		}
+	}
+	if ok, _, _ := s.Allow(ctx, "sub-2", 3, time.Minute); !ok {
+		t.Error("sub-2 was limited by sub-1's usage")
+	}
+}
+
+// Counting must be atomic: concurrent requests must not share a slot and
+// silently exceed the limit, which is exactly the load a limiter is for.
+func TestAllowIsAtomicUnderConcurrency(t *testing.T) {
+	c := newCache()
+	s := c.Namespace("rl")
+
+	const limit, callers = 50, 200
+	var allowed atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ok, _, _ := s.Allow(context.Background(), "k", limit, time.Minute); ok {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := allowed.Load(); got != limit {
+		t.Errorf("allowed %d of %d callers, want exactly %d — the counter is not atomic", got, callers, limit)
+	}
+}
+
+// Refresh-ahead serves the stale value immediately and reloads behind it, so no
+// request ever pays the reload cost.
+func TestGetOrLoadAheadServesStaleAndRefreshes(t *testing.T) {
+	c := newCache()
+	s := c.Namespace("hot").TTL(time.Minute)
+	ctx := context.Background()
+
+	var calls atomic.Int32
+	load := func(context.Context) (user, error) {
+		n := calls.Add(1)
+		return user{Name: "v" + strconv.Itoa(int(n))}, nil
+	}
+
+	// Cold: loads synchronously.
+	u, err := cache.GetOrLoadAhead(ctx, s, "k", 10*time.Millisecond, load)
+	if err != nil || u.Name != "v1" {
+		t.Fatalf("cold load: %+v %v", u, err)
+	}
+
+	time.Sleep(30 * time.Millisecond) // now older than refreshAfter
+
+	// Stale: served immediately from cache, refresh happens behind it.
+	u, err = cache.GetOrLoadAhead(ctx, s, "k", 10*time.Millisecond, load)
+	if err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+	if u.Name != "v1" {
+		t.Errorf("got %q, want the stale v1 served without blocking", u.Name)
+	}
+
+	// The background refresh lands.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := cache.GetOrLoadAhead(ctx, s, "k", time.Hour, load); got.Name == "v2" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("the background refresh never landed")
 }
