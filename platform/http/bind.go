@@ -117,6 +117,24 @@ func bind[Req any](r *http.Request) (Req, error) {
 }
 
 func bindStruct(v reflect.Value, r *http.Request) error {
+	// The BODY IS DECODED FIRST and every source below then overwrites what it
+	// set. That ordering is the security control, not a stylistic choice.
+	//
+	// identity.Subject's fields are PROMOTED through the embedded Actor and
+	// carry no json tags, so encoding/json matches "id" and "roles" in a
+	// request body against the verified caller's own fields. Filling the Actor
+	// before the decode — which is what this did — let any authenticated caller
+	// send {"id":"<someone-else>"} on a POST/PUT/PATCH and have the handler act
+	// as that user. Route-level gating reads the CONTEXT subject and so still
+	// held, but every handler using req.ID for ownership was impersonatable.
+	//
+	// Decoding first also makes the precedence documented on bind (path → query
+	// → header → body) actually true; previously the body silently won over all
+	// three.
+	if err := decodeBody(v, r); err != nil {
+		return err
+	}
+
 	t := v.Type()
 	for i := 0; i < t.NumField(); i++ {
 		field, value := t.Field(i), v.Field(i)
@@ -134,12 +152,17 @@ func bindStruct(v reflect.Value, r *http.Request) error {
 			continue
 		}
 
-		// Embedded OptionalActor: fill from the subject if one is present, and
-		// leave it zero otherwise. Never an error — absence is the point.
+		// Embedded OptionalActor: fill from the subject when one is present.
+		//
+		// The zero value is written explicitly when there is none — anonymity
+		// must overwrite whatever the body may have put there, or a caller
+		// could hand themselves an Authenticated:true actor by sending one.
 		if field.Anonymous && field.Type == reflect.TypeOf(OptionalActor{}) {
+			actor := OptionalActor{}
 			if sub, ok := identity.From(r.Context()); ok && sub.ID != "" {
-				value.Set(reflect.ValueOf(OptionalActor{Subject: sub, Authenticated: true}))
+				actor = OptionalActor{Subject: sub, Authenticated: true}
 			}
+			value.Set(reflect.ValueOf(actor))
 			continue
 		}
 
@@ -189,7 +212,7 @@ func bindStruct(v reflect.Value, r *http.Request) error {
 			continue
 		}
 	}
-	return decodeBody(v, r)
+	return nil
 }
 
 // decodeBody unmarshals a JSON body into the struct's json-tagged fields.
