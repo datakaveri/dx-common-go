@@ -3,6 +3,7 @@ package httpx
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -44,6 +45,16 @@ type Route struct {
 	// document or a health probe. Conflating them is how a public read ends up
 	// anonymous even for a signed-in caller.
 	Optional bool
+	// Stream marks a long-lived streaming response — SSE, a chunked feed, a
+	// large download.
+	//
+	// It exempts the route from the request timeout and from response
+	// compression, both of which are correct for a request/response endpoint
+	// and wrong for a stream: the deadline cuts the stream off mid-flight, and
+	// a buffering compressor holds events until its buffer fills, which looks
+	// exactly like an agent that has stopped responding.
+	Stream bool
+
 	// OpID is the OpenAPI operationId, used by AssertNoDrift.
 	OpID string
 }
@@ -87,6 +98,16 @@ type RouterSpec struct {
 	// Middleware runs on every request, after the platform's own stack.
 	Middleware []func(http.Handler) http.Handler
 	Logger     *zap.Logger
+
+	// Timeout bounds a non-streaming request. Zero selects DefaultTimeout;
+	// NEGATIVE disables it. Routes marked Streaming() are exempt either way —
+	// a deadline kills an SSE stream mid-flight.
+	Timeout time.Duration
+
+	// CORS configures the CORS middleware. Nil selects DefaultCORS(), which
+	// matches what the gin stack served, so migrating changes nothing a
+	// browser can observe.
+	CORS *CORSConfig
 }
 
 // NewRouter builds the standard router: the platform middleware stack, the
@@ -117,9 +138,25 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 	// panic in a later middleware is just as fatal as one in a handler.
 	r.Use(recoverPanics(spec.Logger))
 
+	// Then the standard stack: tracing, request id, real ip, request logging,
+	// CORS. Not optional and not opt-in — see stack.go for why the previous
+	// arrangement (recovery alone, plus a doc comment claiming tracing was
+	// always-on) left nine services with no request log and no traces.
+	cors := DefaultCORS()
+	if spec.CORS != nil {
+		cors = *spec.CORS
+	}
+	for _, mw := range globalStack(spec.Logger, cors) {
+		r.Use(mw)
+	}
+
+	// Service middleware last, so it sees a request that already carries a
+	// request id and a trace context.
 	for _, mw := range spec.Middleware {
 		r.Use(mw)
 	}
+
+	timeout := resolveTimeout(spec.Timeout)
 
 	// Operational endpoints sit OUTSIDE Base and outside authentication:
 	// kubelet does not carry a bearer token, and a readiness probe that needs
@@ -156,8 +193,11 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 	r.Route(base, func(br chi.Router) {
 		public, protected := splitRoutes(sets)
 
+		// perRoute adds the timeout and compression, which are per-route rather
+		// than global because both break a streaming response: a deadline kills
+		// an SSE stream mid-flight and a buffering compressor withholds events.
 		for _, rt := range public {
-			br.Method(rt.Method, rt.Path, rt.Handler)
+			br.Method(rt.Method, rt.Path, perRoute(rt.Handler, rt.Stream, timeout))
 		}
 
 		if len(protected) == 0 {
@@ -173,7 +213,7 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 					// No subject gate: anonymity is the point. The resolver
 					// still ran, so an identified caller reaches the handler
 					// with their Subject on the context.
-					pr.Method(rt.Method, rt.Path, h)
+					pr.Method(rt.Method, rt.Path, perRoute(h, rt.Stream, timeout))
 					continue
 				}
 				if len(rt.Roles) > 0 {
@@ -187,7 +227,7 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 					// accident" mistake nobody catches in review.
 					h = requireSubject(h, spec.Mappers, spec.Logger)
 				}
-				pr.Method(rt.Method, rt.Path, h)
+				pr.Method(rt.Method, rt.Path, perRoute(h, rt.Stream, timeout))
 			}
 		})
 	})
@@ -268,6 +308,13 @@ func Public() RouteOption { return func(r *Route) { r.Public = true } }
 // with HandleOptional; Handle rejects such a request type at construction, so
 // a mismatch fails at boot rather than leaking at runtime.
 func Optional() RouteOption { return func(r *Route) { r.Optional = true } }
+
+// Streaming marks a route as a long-lived streaming response, exempting it
+// from the request timeout and from response compression.
+//
+// Use it for SSE, chunked feeds and large downloads. Pair it with HandleRaw —
+// the envelope cannot express a stream — and remember the handler must flush.
+func Streaming() RouteOption { return func(r *Route) { r.Stream = true } }
 
 // OpID records the OpenAPI operationId, for the spec-drift test.
 func OpID(id string) RouteOption { return func(r *Route) { r.OpID = id } }
