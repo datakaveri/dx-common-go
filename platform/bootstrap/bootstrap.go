@@ -251,11 +251,16 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 	}
 
 	srv := &http.Server{
-		Addr:              addr(base.Server.Port),
-		Handler:           handler,
-		ReadTimeout:       orDuration(base.Server.ReadTimeout, 15*time.Second),
-		WriteTimeout:      orDuration(base.Server.WriteTimeout, 30*time.Second),
-		IdleTimeout:       orDuration(base.Server.IdleTimeout, 120*time.Second),
+		Addr:        addr(base.Server.Port),
+		Handler:     handler,
+		ReadTimeout: orDuration(base.Server.ReadTimeout, 15*time.Second),
+		// Write and idle accept a NEGATIVE value meaning "no limit". A service
+		// that streams needs exactly that, and Go spells no-limit as zero —
+		// which is also what an unset config key produces, so without the
+		// distinction there is no way to ask for it. An SSE stream would then
+		// die at 30s in the HTTP server however the router is configured.
+		WriteTimeout:      serverTimeout(base.Server.WriteTimeout, 30*time.Second),
+		IdleTimeout:       serverTimeout(base.Server.IdleTimeout, 120*time.Second),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -363,4 +368,22 @@ func orDuration(d, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// serverTimeout resolves a server timeout that a service may legitimately want
+// switched OFF: zero takes the fallback, a negative value disables the limit.
+//
+// The asymmetry with orDuration is deliberate. Zero cannot mean "disabled"
+// here because zero is what an unset mapstructure key produces, so a service
+// that never mentioned write_timeout would silently get an unbounded one. A
+// service that genuinely streams says so with -1.
+func serverTimeout(d, fallback time.Duration) time.Duration {
+	switch {
+	case d == 0:
+		return fallback
+	case d < 0:
+		return 0 // http.Server: no timeout
+	default:
+		return d
+	}
 }

@@ -181,6 +181,39 @@ func (s *Store) Incr(ctx context.Context, key string, ttl time.Duration) (int64,
 	return n.Val(), nil
 }
 
+// Allow is a fixed-window rate limiter on a STATIC key: it reports whether
+// this call is within limit, and arms the window on the first hit.
+//
+// It exists alongside Incr because the two suit different key shapes, and
+// picking the wrong one fails in opposite directions. Incr re-arms the TTL on
+// every call, which is correct only when the window is part of the KEY NAME —
+// with a static key it extends the window forever, so a steady caller's counter
+// never resets and they are locked out permanently. Allow takes the static key
+// and rotates the window itself.
+//
+// EXPIRE is issued as ExpireNX inside the same pipeline as INCR, so the window
+// is armed exactly once and atomically. The legacy database/redis.Allow issued
+// them as two round trips and documented the gap: a crash in between left a
+// counter with no TTL, which never reset and silently became a permanent block.
+//
+// It fails CLOSED — an unreachable Redis returns false, not true. A rate
+// limiter that opens under failure is not a rate limiter.
+func (s *Store) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+	if limit <= 0 {
+		return false, nil
+	}
+	pipe := s.c.TxPipeline()
+	n := pipe.Incr(ctx, key)
+	if window > 0 {
+		// NX: only when the key has no TTL, i.e. on the first hit of a window.
+		pipe.ExpireNX(ctx, key, window)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return false, err
+	}
+	return n.Val() <= int64(limit), nil
+}
+
 func (s *Store) Close() error { return s.c.Close() }
 
 // Check satisfies observability/health.Checker, so a service can register the
