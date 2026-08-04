@@ -27,18 +27,11 @@ func TxFromContext(ctx context.Context) (pgx.Tx, bool) {
 	return tx, ok
 }
 
-// WithTx stashes tx on ctx under this package's ambient-transaction key, so a
-// repository calling TxFromContext binds to it.
+// There was a WithTx here, exported so a service mid-migration could republish
+// a platform transaction under this package's key and keep repositories on
+// both sides of the move inside one transaction. dx-acl-go was its only
+// caller and its repositories are now on platform/database/sql, so the bridge
+// is gone: this key is written only by InTransaction, in this package, again.
 //
-// TRANSITIONAL, and the only reason it is exported. A service migrating onto
-// platform/database/sql runs its transactions through sql.Manager, which
-// propagates under its OWN context key — so repositories still reading
-// TxFromContext would not see it and would quietly run their writes on the
-// pool instead, splitting a transaction with no error raised. Bridging the two
-// keys for the duration of the migration is what keeps that atomic.
-//
-// Call it ONLY with a transaction you actually began. Putting an arbitrary
-// value here makes every repository downstream believe it is in a transaction.
-func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
-	return context.WithValue(ctx, txContextKey{}, tx)
-}
+// Do not re-export one. A service that needs the platform's transaction should
+// move onto sql.Conn(ctx, db) rather than teach the legacy key about it.

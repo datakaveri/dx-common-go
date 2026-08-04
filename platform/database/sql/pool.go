@@ -179,18 +179,14 @@ func (c *txConfig) pgx() pgx.TxOptions {
 }
 
 // tx implements Tx.
+//
+// It deliberately exposes NO accessor for the embedded driver transaction. One
+// existed (PgxTx), for sql/pgx.Tx to assert through while dx-acl-go's outbox
+// still took a concrete pgx.Tx; both are gone now that platform/events takes a
+// Querier. The driver transaction stays reachable only from inside this
+// package, which is what keeps "who can bypass transaction propagation?"
+// answerable by reading one file.
 type tx struct{ pgx.Tx }
-
-// PgxTx exposes the underlying driver transaction.
-//
-// It cannot be reached by asserting a Tx to pgx.Tx: both interfaces declare
-// CopyFrom with different signatures, so NO type can satisfy both. Hence this
-// accessor, which sql/pgx.Tx asserts through.
-//
-// It lives here rather than in the escape-hatch package because only this
-// package holds the concrete type. Its audience is still that one caller —
-// read the warnings on sql/pgx.Tx before reaching for it.
-func (t *tx) PgxTx() pgx.Tx { return t.Tx }
 
 func (t *tx) Query(ctx context.Context, sql string, args ...any) (Rows, error) {
 	r, err := t.Tx.Query(ctx, sql, args...)

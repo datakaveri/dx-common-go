@@ -15,8 +15,6 @@
 package pgx
 
 import (
-	"context"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -45,32 +43,15 @@ func Pool(db dxsql.DB) *pgxpool.Pool {
 // repository-level hook never would.
 func Tracer(t pgx.QueryTracer) dxsql.Option { return dxsql.WithTracer(t) }
 
-// Tx returns the pgx transaction the platform manager put on ctx, if any.
+// There was a Tx(ctx) here, returning the driver transaction the platform
+// manager had put on the context. It existed for exactly one thing:
+// messaging/outbox.PGStore.Insert takes a concrete pgx.Tx, so a repository
+// could not adopt platform/database/sql without silently splitting its outbox
+// write away from the row it is supposed to be atomic with.
 //
-// TRANSITIONAL. It exists for code that must hand a concrete driver
-// transaction to an API predating platform/database/sql — specifically
-// messaging/outbox.PGStore.Insert, whose signature takes a pgx.Tx, so a
-// transactional-outbox write cannot otherwise join a Manager.Do transaction.
-// Without it, migrating a repository to the platform while its outbox insert
-// stays on the legacy store silently splits the two writes apart: the outbox
-// row commits independently of the row it is supposed to be atomic with, and
-// nothing fails.
+// platform/events removed the reason. Its outbox takes a sql.Querier, so the
+// same call joins an ambient transaction natively, and dx-acl-go — the only
+// caller — now is. Handing the raw transaction out is not something the
+// platform should make easy, so it is deleted rather than deprecated.
 //
-// It goes away with platform/events, whose outbox takes a sql.Querier and
-// therefore joins the ambient transaction natively. Do NOT reach for this to
-// run ordinary queries — use dxsql.Conn(ctx, db).
-//
-// The assertion goes through PgxTx rather than straight to pgx.Tx because
-// sql.Tx and pgx.Tx both declare CopyFrom with different signatures, so no type
-// can satisfy both. A non-pgx transaction (a fake in a test) reports false.
-func Tx(ctx context.Context) (pgx.Tx, bool) {
-	t, ok := dxsql.TxFrom(ctx)
-	if !ok {
-		return nil, false
-	}
-	u, ok := t.(interface{ PgxTx() pgx.Tx })
-	if !ok {
-		return nil, false
-	}
-	return u.PgxTx(), true
-}
+// Ordinary queries never needed it: use dxsql.Conn(ctx, db).
