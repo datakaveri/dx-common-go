@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,5 +171,35 @@ func TestConsumerRunner_StopReturnsAfterRunExits(t *testing.T) {
 	defer stopCancel()
 	if err := r.Stop(stopCtx); err != nil {
 		t.Fatalf("Stop did not observe Run exit in time: %v", err)
+	}
+}
+
+// TestIsConnected_FalseBeforeConnect pins the state a readiness probe sees
+// while the broker is unreachable. Before this existed a consumer-only service
+// reported ready with no broker at all, because nothing could observe that it
+// was not consuming — see PG-002.
+func TestIsConnected_FalseBeforeConnect(t *testing.T) {
+	r := NewConsumerRunner(ConsumerConfig{Queue: "q"})
+
+	if r.IsConnected() {
+		t.Error("IsConnected = true before Run; a runner that never dialled is not consuming")
+	}
+	if err := r.Check(context.Background()); err == nil {
+		t.Error("Check = nil before Run; readiness would go green with no broker")
+	}
+}
+
+// TestCheck_NamesTheQueue keeps the probe's failure self-describing: a
+// readiness report saying only "not connected" does not say what is not
+// connected when a service consumes more than one queue.
+func TestCheck_NamesTheQueue(t *testing.T) {
+	r := NewConsumerRunner(ConsumerConfig{Queue: "email-notification"})
+
+	err := r.Check(context.Background())
+	if err == nil {
+		t.Fatal("Check = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "email-notification") {
+		t.Errorf("Check error %q does not name the queue", err)
 	}
 }

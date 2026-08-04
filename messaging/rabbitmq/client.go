@@ -1,6 +1,8 @@
 package rabbitmq
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -110,6 +112,20 @@ func (c *Client) IsConnected() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.channel != nil && !c.channel.IsClosed()
+}
+
+// Check implements the platform's health.Checker (Check(ctx) error), so a
+// client can be registered directly as a readiness probe:
+//
+//	app.Probe("rabbitmq", client)
+//
+// Satisfied structurally; see ReliablePublisher.Check for why this package does
+// not import the platform health tree.
+func (c *Client) Check(context.Context) error {
+	if !c.IsConnected() {
+		return errors.New("rabbitmq: client not connected")
+	}
+	return nil
 }
 
 // Close gracefully closes the channel and connection.

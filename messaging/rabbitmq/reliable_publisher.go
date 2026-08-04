@@ -199,6 +199,27 @@ func (p *ReliablePublisher) IsConnected() bool {
 	return p.ch != nil && !p.ch.IsClosed()
 }
 
+// Check implements the platform's health.Checker (Check(ctx) error), so a
+// publisher can be registered directly as a readiness probe:
+//
+//	app.Probe("rabbitmq", publisher)
+//
+// The interface is satisfied STRUCTURALLY — this package does not import
+// platform/observability/health, which would point a legacy messaging package
+// at the platform tree. ConsumerRunner and Client carry the same pair, so
+// "how do I probe this?" has one answer whichever broker handle a service holds.
+//
+// Note that a publisher dials lazily: a service that has not published yet
+// reports not-connected, which is honest but makes this a poor gating probe
+// for a publish-only service that publishes rarely. Prefer Health.AddOptional
+// there, and reserve gating for a service whose job stops without the broker.
+func (p *ReliablePublisher) Check(context.Context) error {
+	if !p.IsConnected() {
+		return fmt.Errorf("rabbitmq: publisher not connected to exchange %q", p.cfg.Exchange)
+	}
+	return nil
+}
+
 // Close releases the connection and channel.
 func (p *ReliablePublisher) Close() {
 	p.mu.Lock()

@@ -69,6 +69,12 @@ type ConsumerRunner struct {
 	attemptsMu sync.Mutex
 	attempts   map[string]int
 
+	// chMu guards ch, which is the runner's connection state: non-nil and open
+	// exactly while it is consuming. Client and ReliablePublisher track theirs
+	// the same way, for the same reason — see IsConnected.
+	chMu sync.RWMutex
+	ch   *amqp.Channel
+
 	done chan struct{}
 }
 
@@ -158,6 +164,14 @@ func (r *ConsumerRunner) runOnce(ctx context.Context, handler Handler) error {
 	}
 	r.logger.Info("consumer connected", zap.String("queue", r.cfg.Queue))
 
+	// Publish connection state only once consuming has actually started: a
+	// dialled channel that never reached Consume is not delivering anything,
+	// and a readiness probe that went green there would be reporting the
+	// wrong thing. Cleared on the way out so a dropped connection is visible
+	// during the reconnect backoff rather than after it.
+	r.setChannel(ch)
+	defer r.setChannel(nil)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -174,6 +188,46 @@ func (r *ConsumerRunner) runOnce(ctx context.Context, handler Handler) error {
 			r.dispatch(ctx, d, handler)
 		}
 	}
+}
+
+func (r *ConsumerRunner) setChannel(ch *amqp.Channel) {
+	r.chMu.Lock()
+	defer r.chMu.Unlock()
+	r.ch = ch
+}
+
+// IsConnected reports whether the runner is currently consuming on an open
+// channel. It does not perform network IO, matching Client.IsConnected and
+// ReliablePublisher.IsConnected — a readiness probe runs on every kubelet
+// tick, so it must not dial.
+//
+// It is false before the first successful connect and for the whole of every
+// reconnect backoff, which is the point: a consumer-only service whose broker
+// is unreachable is delivering nothing, and readiness that says otherwise is
+// the failure this exists to end.
+func (r *ConsumerRunner) IsConnected() bool {
+	r.chMu.RLock()
+	defer r.chMu.RUnlock()
+	return r.ch != nil && !r.ch.IsClosed()
+}
+
+// Check implements the platform's health.Checker (Check(ctx) error), so a
+// runner can be registered directly as a readiness probe:
+//
+//	app.Probe("rabbitmq", consumer.Runner())
+//
+// The interface is satisfied STRUCTURALLY — this package deliberately does not
+// import platform/observability/health, which would point a legacy messaging
+// package at the platform tree and invert the dependency direction.
+//
+// Whether an unreachable broker should fail readiness or merely be reported is
+// the service's call, not the platform's: register with Health.Add to gate
+// traffic, or Health.AddOptional for a service that genuinely degrades.
+func (r *ConsumerRunner) Check(context.Context) error {
+	if !r.IsConnected() {
+		return fmt.Errorf("rabbitmq: not consuming queue %q", r.cfg.Queue)
+	}
+	return nil
 }
 
 func (r *ConsumerRunner) dispatch(ctx context.Context, d Delivery, handler Handler) {

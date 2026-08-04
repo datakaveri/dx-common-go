@@ -21,6 +21,14 @@
 // state this package exists to end. Consumers accept both shapes during the
 // transition; see dx-authz-go's decoder.
 //
+// # Delivery guarantees
+//
+// Publishing is confirmed (see Open). Consuming is at-least-once with a
+// bounded attempt count: an event whose handler keeps failing is dead-lettered
+// to "<group>.<topic>.dlq" after Config.MaxAttempts, never silently discarded.
+// Both halves delegate to messaging/rabbitmq rather than reimplementing —
+// Subscribe's doc comment records the two defects that reimplementation cost.
+//
 // Layer: L3 (adapter).
 package amqp
 
@@ -29,12 +37,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 
 	dxmq "github.com/datakaveri/dx-common-go/messaging/rabbitmq"
 	"github.com/datakaveri/dx-common-go/platform/events"
+)
+
+const (
+	// defaultMaxAttempts bounds redeliveries before an event is dead-lettered.
+	defaultMaxAttempts = 5
+	// closeTimeout bounds how long Close waits for in-flight handlers.
+	closeTimeout = 15 * time.Second
 )
 
 // Config wires the broker.
@@ -47,6 +63,11 @@ type Config struct {
 	// Prefetch bounds unacknowledged deliveries per consumer. Without it a
 	// broker hands one consumer the whole backlog and the rest idle.
 	Prefetch int `mapstructure:"prefetch"`
+	// MaxAttempts caps redeliveries of a failing event before it is
+	// dead-lettered. Defaults to 5. Zero would mean unlimited, which is how a
+	// poison event stalls everything behind it, so Open rewrites 0 to the
+	// default rather than honouring it.
+	MaxAttempts int `mapstructure:"max_attempts"`
 }
 
 // Bus is an events.Bus over RabbitMQ.
@@ -55,10 +76,15 @@ type Bus struct {
 	cfg      Config
 	log      *zap.Logger
 	mu       sync.Mutex
-	conns    []*amqp091.Connection
-	chans    []*amqp091.Channel
+	runners  []*dxmq.ConsumerRunner
 	closed   bool
 	exchange string
+
+	// ctx bounds every consumer's lifetime. Subscribe takes no context (the
+	// events.Bus interface does not offer one), so the bus owns it and Close
+	// cancels it.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Open connects.
@@ -77,6 +103,9 @@ func Open(cfg Config) (*Bus, error) {
 	if cfg.Prefetch <= 0 {
 		cfg.Prefetch = 32
 	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = defaultMaxAttempts
+	}
 	pub, err := dxmq.NewReliablePublisher(dxmq.PublisherConfig{
 		URL:          cfg.URL,
 		Exchange:     cfg.Exchange,
@@ -87,7 +116,15 @@ func Open(cfg Config) (*Bus, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bus{pub: pub, cfg: cfg, log: zap.NewNop(), exchange: cfg.Exchange}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Bus{
+		pub:      pub,
+		cfg:      cfg,
+		log:      zap.NewNop(),
+		exchange: cfg.Exchange,
+		ctx:      ctx,
+		cancel:   cancel,
+	}, nil
 }
 
 // WithLogger sets the logger used for consumer-side reporting.
@@ -117,6 +154,25 @@ func (b *Bus) Publish(ctx context.Context, topic string, e events.Event) error {
 // the semantics events.Bus promises: members of a group share that queue
 // (competing consumers), while a distinct group has its own and therefore
 // sees every message.
+//
+// Consuming delegates to messaging/rabbitmq.ConsumerRunner, for the same
+// reason Open delegates publishing to ReliablePublisher: the runner already
+// owns the dial → declare → consume → ack loop with a reconnect supervisor,
+// an attempt cap, and W3C trace continuation. The hand-rolled loop this
+// replaced had neither of the first two, and both absences were silent:
+//
+//   - No reconnect. It ranged over one channel's deliveries, so when that
+//     channel closed the goroutine RETURNED and the group stopped consuming
+//     for the life of the process. Nothing logged it as fatal, because from
+//     the range's point of view the stream simply ended. This is the defect
+//     ConsumerRunner was built to fix (ROADMAP P0-5), reintroduced here.
+//   - No dead-letter queue. A failing event was requeued once and then
+//     ACKNOWLEDGED — silently destroyed, with only a log line. At-least-once
+//     delivery was the promise; at-most-twice-then-discard was the behaviour.
+//
+// DeclareQueueWithDLQ supplies the topology, so an event that exhausts
+// MaxAttempts lands in "<group>.<topic>.dlq" via AMQP's native dead-lettering
+// and can be inspected and replayed.
 func (b *Bus) Subscribe(topic, group string, h events.Handler) error {
 	b.mu.Lock()
 	if b.closed {
@@ -125,85 +181,59 @@ func (b *Bus) Subscribe(topic, group string, h events.Handler) error {
 	}
 	b.mu.Unlock()
 
-	conn, err := amqp091.Dial(b.cfg.URL)
-	if err != nil {
-		return fmt.Errorf("amqp: dial: %w", err)
-	}
-	ch, err := conn.Channel()
-	if err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("amqp: channel: %w", err)
-	}
-	if err := ch.ExchangeDeclare(b.exchange, b.cfg.ExchangeType, true, false, false, false, nil); err != nil {
-		return b.abort(conn, ch, fmt.Errorf("amqp: declare exchange: %w", err))
-	}
-
 	queue := group + "." + topic
-	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
-		return b.abort(conn, ch, fmt.Errorf("amqp: declare queue %s: %w", queue, err))
-	}
-	if err := ch.QueueBind(queue, topic, b.exchange, false, nil); err != nil {
-		return b.abort(conn, ch, fmt.Errorf("amqp: bind %s: %w", queue, err))
-	}
-	if err := ch.Qos(b.cfg.Prefetch, 0, false); err != nil {
-		return b.abort(conn, ch, fmt.Errorf("amqp: qos: %w", err))
-	}
-
-	// autoAck=false: acknowledging before the handler runs would lose the
-	// message on any handler failure, which is the opposite of at-least-once.
-	deliveries, err := ch.Consume(queue, "", false, false, false, false, nil)
-	if err != nil {
-		return b.abort(conn, ch, fmt.Errorf("amqp: consume %s: %w", queue, err))
-	}
+	runner := dxmq.NewConsumerRunner(dxmq.ConsumerConfig{
+		URL:           b.cfg.URL,
+		Queue:         queue,
+		ConsumerTag:   group,
+		PrefetchCount: b.cfg.Prefetch,
+		MaxAttempts:   b.cfg.MaxAttempts,
+		Logger:        b.log,
+		// Setup runs on every (re)connect, so the topology is re-declared
+		// after a broker restart that lost it. Declaration is idempotent.
+		Setup: func(ch *amqp091.Channel) error {
+			_, err := dxmq.DeclareQueueWithDLQ(ch, b.exchange, b.cfg.ExchangeType, queue, topic, true)
+			return err
+		},
+	})
 
 	b.mu.Lock()
-	b.conns = append(b.conns, conn)
-	b.chans = append(b.chans, ch)
+	b.runners = append(b.runners, runner)
 	b.mu.Unlock()
 
-	go b.consume(deliveries, topic, group, h)
+	go runner.Run(b.ctx, b.dispatch(topic, group, h))
 	return nil
 }
 
-// consume dispatches deliveries to the handler.
-func (b *Bus) consume(deliveries <-chan amqp091.Delivery, topic, group string, h events.Handler) {
-	for d := range deliveries {
+// dispatch adapts an events.Handler to the runner's Outcome vocabulary.
+func (b *Bus) dispatch(topic, group string, h events.Handler) dxmq.Handler {
+	return func(ctx context.Context, d dxmq.Delivery) dxmq.Outcome {
 		var e events.Event
 		if err := json.Unmarshal(d.Body, &e); err != nil {
-			// Unparseable: acknowledge and drop. Requeuing would spin the
-			// same message forever and starve the queue behind it.
+			// Unparseable: acknowledge and drop. Neither requeue nor DLQ helps
+			// — there is no structured payload to inspect on replay, and
+			// requeuing would spin the same bytes forever.
 			b.log.Error("amqp: undecodable event dropped",
 				zap.String("topic", topic), zap.String("group", group), zap.Error(err))
-			_ = d.Ack(false)
-			continue
+			return dxmq.Ack
 		}
 
-		err := h(context.Background(), e)
-		switch {
+		switch err := h(ctx, e); {
 		case err == nil:
-			_ = d.Ack(false)
+			return dxmq.Ack
 		case isDrop(err):
-			// The handler declared this will never succeed.
+			// The handler declared this will never succeed — a version it
+			// cannot read, say. Retrying buries the failures that matter.
 			b.log.Warn("amqp: event dropped by handler",
 				zap.String("topic", topic), zap.String("id", e.ID), zap.Error(err))
-			_ = d.Ack(false)
+			return dxmq.Ack
 		default:
-			// Requeue ONCE. d.Redelivered tells us this is the second
-			// attempt, so a persistently failing message is dropped with a
-			// loud log rather than cycling forever — a poison message that
-			// requeues indefinitely blocks everything behind it, which is the
-			// classic way one bad event stalls an entire projection.
-			//
-			// A real DLQ replaces this; see the package TODO.
-			if d.Redelivered {
-				b.log.Error("amqp: event failed twice, dropping",
-					zap.String("topic", topic), zap.String("id", e.ID), zap.Error(err))
-				_ = d.Ack(false)
-				continue
-			}
-			b.log.Warn("amqp: event failed, requeueing once",
+			// Transient: requeue. The runner converts this to DeadLetter once
+			// MaxAttempts is exhausted, so a poison event reaches the DLQ
+			// instead of cycling forever or being discarded.
+			b.log.Warn("amqp: event failed, requeueing",
 				zap.String("topic", topic), zap.String("id", e.ID), zap.Error(err))
-			_ = d.Nack(false, true)
+			return dxmq.Requeue
 		}
 	}
 }
@@ -223,23 +253,35 @@ func isDrop(err error) bool {
 	return false
 }
 
-func (b *Bus) abort(conn *amqp091.Connection, ch *amqp091.Channel, err error) error {
-	_ = ch.Close()
-	_ = conn.Close()
-	return err
-}
-
 // Close stops every consumer and the publisher.
+//
+// It waits for each runner's in-flight handler to return before closing the
+// publisher, so a handler that itself publishes cannot be cut off mid-call.
+// The wait is bounded: a handler wedged on a hung dependency must not hold
+// shutdown open indefinitely.
 func (b *Bus) Close() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil
+	}
 	b.closed = true
-	for _, ch := range b.chans {
-		_ = ch.Close()
+	runners := append([]*dxmq.ConsumerRunner(nil), b.runners...)
+	b.mu.Unlock()
+
+	// Cancel first, so every runner's Run observes the cancellation and begins
+	// unwinding; only then wait for them.
+	b.cancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	defer cancel()
+	for _, r := range runners {
+		if err := r.Stop(ctx); err != nil {
+			b.log.Warn("amqp: consumer did not stop before the deadline", zap.Error(err))
+			break
+		}
 	}
-	for _, c := range b.conns {
-		_ = c.Close()
-	}
+
 	b.pub.Close()
 	return nil
 }
