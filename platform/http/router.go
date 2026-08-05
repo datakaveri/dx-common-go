@@ -93,7 +93,13 @@ type RouterSpec struct {
 	DocsPath string
 	// Auth wires authentication onto Base. Routes marked Public bypass it.
 	Auth AuthSpec
-	// Mappers are error mappers passed to every handler built by Routes.
+	// Mappers are error mappers applied to every handler under this router, and
+	// to its auth gates.
+	//
+	// They reach a handler through the request context rather than through the
+	// adapter's options, because Handle has already run by the time NewRouter
+	// sees a route. A mapper registered per handler with WithMappers is tried
+	// FIRST; these run after it.
 	Mappers []ErrorMapper
 	// Middleware runs on every request, after the platform's own stack.
 	Middleware []func(http.Handler) http.Handler
@@ -154,6 +160,18 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 	// request id and a trace context.
 	for _, mw := range spec.Middleware {
 		r.Use(mw)
+	}
+
+	// Publish the service's error mappers so every handler adapter under this
+	// router can reach them. Installed for the whole router rather than only
+	// the Base group: a Public route's handler renders errors the same way.
+	if len(spec.Mappers) > 0 {
+		mappers := spec.Mappers
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				next.ServeHTTP(w, req.WithContext(withMappers(req.Context(), mappers)))
+			})
+		})
 	}
 
 	timeout := resolveTimeout(spec.Timeout)

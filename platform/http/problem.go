@@ -47,6 +47,28 @@ type Problem struct {
 // repeating a type switch in every handler.
 type ErrorMapper func(error) (Problem, bool)
 
+// mapperKey carries RouterSpec.Mappers down to the handler adapters.
+//
+// The context is the only channel available: a route's handler is ALREADY a
+// built http.HandlerFunc by the time NewRouter sees it — Handle runs inside the
+// service's own Routes() function — so the router cannot hand mappers to it at
+// construction time. Before this, RouterSpec.Mappers was read only by the auth
+// gates, and a service that set it (as the migration runbook instructs) still
+// had every classified error from its service layer rendered as a generic 500.
+// Pinned by TestRouterSpecMappersReachHandlers.
+type mapperKey struct{}
+
+// withMappers puts the router's mappers on the context.
+func withMappers(ctx context.Context, m []ErrorMapper) context.Context {
+	return context.WithValue(ctx, mapperKey{}, m)
+}
+
+// mappersFrom returns the router-level mappers carried on ctx, if any.
+func mappersFrom(ctx context.Context) []ErrorMapper {
+	m, _ := ctx.Value(mapperKey{}).([]ErrorMapper)
+	return m
+}
+
 // ToProblem applies the mapper chain and then the platform's own rules.
 //
 // The rules, stated once and enforced by the adapter:

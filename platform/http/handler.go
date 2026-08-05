@@ -256,7 +256,16 @@ func writeError(w http.ResponseWriter, r *http.Request, err error, o *options) {
 		return
 	}
 
-	p := ToProblem(err, o.mappers)
+	// Per-handler mappers first, then the router's. A handler that registered
+	// its own translation for an error type wins over the service-wide one,
+	// which is the order a reader expects: the more specific registration is
+	// the nearer one.
+	mappers := o.mappers
+	if shared := mappersFrom(r.Context()); len(shared) > 0 {
+		mappers = append(append(make([]ErrorMapper, 0, len(o.mappers)+len(shared)), o.mappers...), shared...)
+	}
+
+	p := ToProblem(err, mappers)
 	if p.Status >= http.StatusInternalServerError {
 		// The real cause is logged here and nowhere else: the client body
 		// carries only the generic message ToProblem produced.
