@@ -46,7 +46,13 @@ type OptionalActor struct {
 	Authenticated bool
 }
 
-// None is the empty request, for handlers that take no input.
+// None is the empty request or the empty response.
+//
+// As a REQUEST it is a handler that takes no input. As a RESPONSE it is a
+// handler that succeeds without a payload — an acknowledged action such as a
+// bookmark or a vote — and the envelope then omits `result` rather than
+// emitting an empty object. Prefer it over HandleVoid where the endpoint must
+// keep answering 200 with an envelope instead of a bare 204.
 type None struct{}
 
 // Binder is implemented by a request type that decodes itself, for the cases

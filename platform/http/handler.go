@@ -232,6 +232,16 @@ func writeResult[Res any](w http.ResponseWriter, res Res, o *options) {
 		body, info = items, &pi
 	}
 
+	// None means "no payload", so drop the field entirely rather than emitting
+	// "result": {}. Handlers for actions that acknowledge without returning
+	// anything — a bookmark, a vote, a status change — are the users of this,
+	// and the writer this package replaced omitted the key for them. Rendering
+	// an empty object instead would be a visible envelope change for every such
+	// endpoint. Setting the interface to nil is what lets omitempty fire.
+	if _, empty := body.(None); empty {
+		body = nil
+	}
+
 	env := envelope{Type: urn, Title: o.title, Detail: o.detail, Result: body, PaginationInfo: info}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
