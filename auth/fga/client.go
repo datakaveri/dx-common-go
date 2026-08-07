@@ -161,8 +161,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		req.Header.Set("Authorization", "Bearer "+c.cfg.ServiceToken)
 	}
 	if c.cfg.SharedSecret != "" {
-		// HMAC service identity — lets the authz service require resolver
-		// auth on /v1/* without per-service tokens.
+		// LEGACY pseudo-user identity. Retained during the ADR-06 rollout so an
+		// unmigrated dx-authz-go keeps accepting these calls; it goes away with
+		// the shared secret at stage 3.
 		signed, err := headers.Sign(auth.DxUser{
 			ID:    "svc:" + c.cfg.ServiceName,
 			Roles: []string{"service"},
@@ -171,6 +172,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			return fmt.Errorf("fga client: sign service identity: %w", err)
 		}
 		headers.Apply(req, signed)
+	}
+	if c.cfg.Workload != nil {
+		// The real identity, alongside the pseudo-user rather than instead of
+		// it: verifier before signer means dx-authz-go must accept both before
+		// anything stops sending the old one.
+		//
+		// A failure here is NOT fatal while the pseudo-user is still being sent
+		// — dropping an authorization call because Keycloak blinked would turn
+		// a credential problem into a denial of service on the PDP path. Once
+		// SharedSecret is gone this must become an error; that is stage 3.
+		if err := c.cfg.Workload.Authorize(ctx, req, AuthzWorkload); err != nil {
+			if c.cfg.SharedSecret == "" {
+				return fmt.Errorf("fga client: workload credential: %w", err)
+			}
+		}
 	}
 
 	resp, err := c.http.Do(req)

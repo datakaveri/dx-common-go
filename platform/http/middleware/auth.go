@@ -11,6 +11,7 @@ import (
 	dxheaders "github.com/datakaveri/dx-common-go/transport/headers"
 
 	"github.com/datakaveri/dx-common-go/platform/security/identity"
+	"github.com/datakaveri/dx-common-go/platform/security/workload"
 )
 
 // AuthConfig is the platform's inbound identity wiring.
@@ -48,6 +49,21 @@ type AuthConfig struct {
 	// JWT enables a direct Bearer path alongside HMAC, for an operator calling
 	// a service without going through the gateway.
 	JWT dxjwt.Config
+
+	// Workload authenticates the CALLING SERVICE, which is a different question
+	// from the one above: HMACSecret and JWT establish *which user* a request
+	// speaks for, this establishes *which workload* is speaking.
+	//
+	// Under the shared HMAC those two collapsed into one — possession of the
+	// secret was authority to assert any user to any service (review finding
+	// C-02, ROADMAP P0-2). Separating them is the fix, and it is why this is a
+	// distinct field rather than another flag on the HMAC path.
+	//
+	// NIL DISABLES IT, which is the rollout default: a service that pulls this
+	// library and changes nothing behaves exactly as before. Build a verifier
+	// with workload.NewVerifier once the service's Keycloak client and audience
+	// scope exist. See ADR-06.
+	Workload *workload.Verifier
 }
 
 // Resolve verifies the caller and puts an identity.Subject on the request
@@ -72,6 +88,16 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 		AllowDirect: cfg.JWT.Enabled || cfg.HMACSecret == "",
 	})
 
+	// The workload gate wraps EVERYTHING below, so it runs before the subject is
+	// resolved. That order is the point, not an implementation detail: the gate
+	// decides whether this caller may speak for a user at all, and resolving the
+	// subject first would mean trusting the X-Subject-* headers in order to
+	// decide whether to trust them.
+	//
+	// With cfg.Workload nil this is the identity function and the chain below is
+	// byte-for-byte what it was before.
+	workloadGate := workload.Middleware(cfg.Workload)
+
 	return func(next http.Handler) http.Handler {
 		publish := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if sub, ok := SubjectFrom(r); ok {
@@ -82,9 +108,12 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 		inner := resolver(publish)
 
 		if cfg.Mode == Required {
-			return inner
+			return workloadGate(inner)
 		}
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Optional applies to the USER credential only. The workload gate still
+		// wraps it, so a service-to-service call with no user identity is served
+		// anonymously while its calling workload is still authenticated.
+		return workloadGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Optional: only run the resolver when a credential is actually
 			// present. Running it unconditionally would reject the anonymous
 			// request this mode exists to serve.
@@ -97,7 +126,7 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r)
-		})
+		}))
 	}
 }
 

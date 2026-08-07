@@ -225,8 +225,35 @@ func PlatformDefaults() map[string]any {
 		// container.
 		"internal_auth.shared_secret":  "",
 		"internal_auth.header_max_age": 0,
-		"openapi.swagger_ui_enabled":   true,
-		"openapi.swagger_ui_path":      "/docs",
+		// Workload identity (ADR-06 / ROADMAP P0-2). Registered here as bare
+		// KEYS, with no import of platform/security/workload: config is L0 and
+		// must stay a leaf, so it owns key registration while that package owns
+		// the types. A service opts in by declaring
+		//
+		//	WorkloadVerifier workload.VerifierConfig `mapstructure:"workload_verifier"`
+		//	WorkloadIssuer   issuer.Config           `mapstructure:"workload_issuer"`
+		//
+		// Two keys rather than one nested block because the verifier's realm
+		// `issuer` field would otherwise collide with an `issuer:` sub-block.
+		//
+		// Empty enforcement means disabled, so declaring these changes nothing
+		// until a service sets them.
+		"workload_verifier.enforcement":       "",
+		"workload_verifier.jwks_url":          "",
+		"workload_verifier.issuer":            "",
+		"workload_verifier.service":           "",
+		"workload_verifier.leeway_seconds":    0,
+		"workload_verifier.refresh_interval":  0,
+		"workload_verifier.allowed_callers":   []string{},
+		"workload_verifier.subject_asserters": []string{},
+		"workload_issuer.enabled":             false,
+		"workload_issuer.token_url":           "",
+		"workload_issuer.client_id":           "",
+		"workload_issuer.client_secret":       "",
+		"workload_issuer.request_timeout":     0,
+		"workload_issuer.refresh_skew":        0,
+		"openapi.swagger_ui_enabled":          true,
+		"openapi.swagger_ui_path":             "/docs",
 		// Validation defaults ON: an unvalidated request is how a spec and its
 		// implementation drift apart without anyone noticing.
 		"openapi.validate_requests": true,

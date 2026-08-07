@@ -18,6 +18,16 @@ type DxClaims struct {
 	OrganisationID    string           `json:"organisation_id"`
 	OrganisationName  string           `json:"organisation_name"`
 	DelegatorID       string           `json:"did,omitempty"`
+	// AuthorizedParty is the OIDC "azp" claim — the client the token was
+	// issued to. On a client-credentials token that client IS the calling
+	// workload, which is what platform/security/workload authenticates.
+	// Distinct from Subject: `sub` is the service-account user Keycloak
+	// created for the client, `azp` is the client itself.
+	AuthorizedParty string `json:"azp,omitempty"`
+	// ClientID is Keycloak's "client_id" claim. Some token profiles emit it
+	// instead of azp, so workload verification falls back to it rather than
+	// rejecting a legitimate credential over a claim-name difference.
+	ClientID string `json:"client_id,omitempty"`
 	// Scope is the raw space-separated scope string from the token.
 	Scope            string                 `json:"scope,omitempty"`
 	DelegationScopes []DelegationScopeClaim `json:"delegation_scopes,omitempty"`

@@ -90,6 +90,16 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 //
 // MUST be installed AFTER Middleware in the chain — it reads the origin
 // the resolver placed in the context.
+//
+// SUPERSEDED by platform/security/workload.RequireCaller, and weaker than its
+// name suggests. OriginGateway means only that the request carried a valid HMAC
+// signature, and every service holds the same secret — so this proves
+// "somebody with the shared secret called", not "the gateway called" (review
+// finding C-02, ROADMAP P0-2, ADR-06 §2.6). Switch to RequireCaller once the
+// service verifies workload identity; it checks a cryptographically bound
+// client id instead. Not marked Deprecated yet only because the one remaining
+// consumer (dx-agent-registry-go) cannot switch until its verifier is enabled,
+// and a lint failure there would block the rollout that removes it.
 func RequireGatewayOrigin() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
