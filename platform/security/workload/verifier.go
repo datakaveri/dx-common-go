@@ -47,8 +47,8 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Enforcement.normalize() == Disabled {
-		return nil, errors.New("workload: NewVerifier called with enforcement disabled; pass a nil *Verifier instead")
+	if cfg.Enforcement == Off {
+		return nil, errors.New("workload: NewVerifier called with enforcement off; pass a nil *Verifier instead")
 	}
 
 	audience := AudienceFor(cfg.Service)
@@ -74,7 +74,7 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 		cfg:              cfg,
 		validator:        validator,
 		audience:         audience,
-		enforcement:      cfg.Enforcement.normalize(),
+		enforcement:      cfg.Enforcement,
 		allowedCallers:   set(cfg.AllowedCallers),
 		subjectAsserters: set(cfg.SubjectAsserters),
 	}
@@ -158,31 +158,30 @@ func (v *Verifier) MayAssertSubject(p Principal) bool {
 	return ok
 }
 
-// FromConfig builds a Verifier from cfg, or returns (nil, nil) when workload
-// verification is disabled.
+// FromConfig builds a Verifier from cfg, or returns (nil, nil) only when
+// enforcement is EXPLICITLY "off".
 //
-// It exists so the disabled case is expressed once rather than in every
-// service's main.go. The shape it replaces —
+// An unset mode is an error, not a nil verifier (ROADMAP P0-17). That is the
+// whole point: it used to mean "disabled", every service shipped unset, and so
+// nothing in the fleet verified a caller while every config claimed to support
+// it. Whether a service authenticates its callers is a deployment decision and
+// has to be stated.
 //
-//	if cfg.Enforcement == "" || cfg.Enforcement == workload.Disabled {
-//	    return nil, nil
-//	}
-//	return workload.NewVerifier(cfg)
-//
-// is the kind of five-line block that became `type AuthConfig` redeclared in 17
-// files. Getting it wrong in one service means that service silently runs with
-// no workload verification while its config says otherwise.
+// It exists so that decision is expressed once rather than in every service's
+// main.go — the kind of five-line block that became `type AuthConfig` redeclared
+// in 17 files.
 //
 // A nil result is meaningful and safe: middleware.AuthConfig.Workload treats it
 // as "not enabled". An ERROR is fatal and must be treated as such by the caller
 // — a service that logs it and continues is running unverified while believing
 // it is not.
 func FromConfig(cfg VerifierConfig) (*Verifier, error) {
-	if cfg.Enforcement.normalize() == Disabled {
-		// Validate anyway: a typo in the mode must not read as "disabled".
-		if err := cfg.Enforcement.Validate(); err != nil {
-			return nil, err
-		}
+	// Validate FIRST, always: an unset or misspelled mode must be an error, not
+	// a silent "no verification" (ROADMAP P0-17).
+	if err := cfg.Enforcement.Validate(); err != nil {
+		return nil, err
+	}
+	if cfg.Enforcement == Off {
 		return nil, nil
 	}
 	return NewVerifier(cfg)

@@ -73,7 +73,7 @@ func (r *realm) token(t *testing.T, caller, destination string) string {
 func (r *realm) verifier(t *testing.T, service string, asserters ...string) *workload.Verifier {
 	t.Helper()
 	v, err := workload.NewVerifier(workload.VerifierConfig{
-		Enforcement:      workload.Permissive,
+		Enforcement:      workload.Required,
 		JwksURL:          r.srv.URL + "/protocol/openid-connect/certs",
 		Issuer:           r.srv.URL,
 		Service:          service,
@@ -128,14 +128,22 @@ func TestResolveWithoutWorkloadVerifierIsUnchanged(t *testing.T) {
 	assert.Empty(t, obs.caller.ID, "no verifier means no workload identity is fabricated")
 }
 
-func TestResolvePermissiveAcceptsBothCredentials(t *testing.T) {
+// TestResolveRequiresAWorkloadCredential replaces
+// TestResolvePermissiveAcceptsBothCredentials, and the replacement IS the fix
+// for C-02 (ROADMAP P0-17).
+//
+// That test asserted an unmigrated caller presenting only the legacy HMAC "must
+// keep working during stage 1". There is no stage 1 any more: nothing is
+// deployed, so there was never traffic to migrate, and accepting the HMAC alone
+// meant an attacker holding the shared secret could simply omit the token.
+func TestResolveRequiresAWorkloadCredential(t *testing.T) {
 	kc := newRealm(t)
 	cfg := middleware.AuthConfig{
 		HMACSecret: testHMACSecret,
 		Workload:   kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
 	}
 
-	t.Run("legacy HMAC only", func(t *testing.T) {
+	t.Run("legacy HMAC alone is rejected", func(t *testing.T) {
 		obs := &observed{}
 		r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
 		signedSubject(t, r, "user-1")
@@ -143,12 +151,12 @@ func TestResolvePermissiveAcceptsBothCredentials(t *testing.T) {
 		rec := httptest.NewRecorder()
 		middleware.Resolve(cfg)(obs.handler()).ServeHTTP(rec, r)
 
-		require.Equal(t, http.StatusOK, rec.Code, "an unmigrated caller must keep working during stage 1")
-		assert.Equal(t, "user-1", obs.subject.ID)
-		assert.Empty(t, obs.caller.ID)
+		require.Equal(t, http.StatusUnauthorized, rec.Code,
+			"a valid HMAC must no longer be sufficient — that sufficiency IS C-02")
+		assert.False(t, obs.served, "the handler ran on a request with no workload credential")
 	})
 
-	t.Run("workload token and HMAC together", func(t *testing.T) {
+	t.Run("workload token resolves both identities", func(t *testing.T) {
 		obs := &observed{}
 		r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
 		signedSubject(t, r, "user-1")
@@ -159,7 +167,7 @@ func TestResolvePermissiveAcceptsBothCredentials(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "user-1", obs.subject.ID, "the user still resolves")
-		assert.Equal(t, "dx-gateway-go", obs.caller.ID, "and now the calling workload is known too")
+		assert.Equal(t, "dx-gateway-go", obs.caller.ID, "and the calling workload is known")
 	})
 }
 

@@ -11,10 +11,12 @@ import (
 const (
 	// resultVerified — a workload credential was present and verified.
 	resultVerified = "verified"
-	// resultLegacy — no workload credential; the request continues on the
-	// legacy HMAC path. THIS is the series that gates HMAC removal: stage 3
-	// may not begin while any caller still produces it.
-	resultLegacy = "legacy"
+	// There is no `legacy` result. It counted requests continuing on the shared
+	// HMAC because no workload credential was presented, and it was THE series
+	// that gated HMAC removal — stage 3 could not begin while any caller still
+	// produced it. Removing the fallback removed the path, so the series can
+	// only ever be zero (ROADMAP P0-17). An absent credential is now `missing`,
+	// which is a rejection rather than a migration signal.
 	// resultRejected — a credential was present and did not verify.
 	resultRejected = "rejected"
 	// resultMissing — no credential, under Required. A caller that has not
@@ -55,5 +57,5 @@ func record(result, caller string, mode Enforcement) {
 	if caller == "" {
 		caller = callerUnknown
 	}
-	authTotal.WithLabelValues(result, caller, string(mode.normalize())).Inc()
+	authTotal.WithLabelValues(result, caller, string(mode)).Inc()
 }

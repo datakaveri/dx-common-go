@@ -48,7 +48,7 @@ func withSubject(r *http.Request) *http.Request {
 	return r
 }
 
-func TestMiddlewareDisabledPassesEverythingThrough(t *testing.T) {
+func TestMiddlewareOffPassesEverythingThrough(t *testing.T) {
 	s := &spy{}
 
 	rec := serve(t, workload.Middleware(nil), s.handler(), request(t))
@@ -58,27 +58,35 @@ func TestMiddlewareDisabledPassesEverythingThrough(t *testing.T) {
 	assert.False(t, s.verified, "and must not fabricate a workload identity")
 }
 
-func TestMiddlewarePermissiveAllowsTheLegacyPath(t *testing.T) {
+// TestMiddlewareRejectsAMissingCredential is the inverse of the test that used
+// to live here (TestMiddlewarePermissiveAllowsTheLegacyPath), and the swap IS
+// the fix for C-02 (ROADMAP P0-17).
+//
+// That test asserted a request with no workload credential was allowed through
+// to the legacy HMAC path. Its own documentation admitted the consequence: an
+// attacker holding the shared secret simply omitted the token. There is nothing
+// to fall back to now, so absence is a 401.
+func TestMiddlewareRejectsAMissingCredential(t *testing.T) {
 	kc := keycloak.New(t)
 	v := kc.Verifier("dx-acl-go", func(c *workload.VerifierConfig) {
-		c.Enforcement = workload.Permissive
+		c.Enforcement = workload.Required
 	})
 	s := &spy{}
 
 	rec := serve(t, workload.Middleware(v), s.handler(), request(t))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.True(t, s.served, "stage 1 must not break a caller that has not migrated yet")
-	assert.False(t, s.verified)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a request with no workload credential must not proceed — there is no legacy path to fall back to")
+	assert.False(t, s.served, "the handler ran despite no credential being presented")
 }
 
-// The property that makes Permissive safe: absence is tolerated, invalidity is
+// Invalidity is fatal. Absence used to be tolerated (Permissive); now it is
 // not. Falling through on a bad token would hand an attacker a downgrade —
 // corrupt your credential and get in on the legacy path instead.
 func TestMiddlewareRejectsAnInvalidCredentialInEveryMode(t *testing.T) {
 	kc := keycloak.New(t)
 
-	for _, mode := range []workload.Enforcement{workload.Permissive, workload.Required} {
+	for _, mode := range []workload.Enforcement{workload.Required} {
 		t.Run(string(mode), func(t *testing.T) {
 			v := kc.Verifier("dx-acl-go", func(c *workload.VerifierConfig) {
 				c.Enforcement = mode

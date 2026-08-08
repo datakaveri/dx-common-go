@@ -12,46 +12,31 @@ const maxLeewaySeconds = 300
 
 // Enforcement selects how strictly a verifier treats the workload credential.
 //
-// It is a string rather than an int so it decodes straight from YAML and from
-// an environment variable with no viper decode hook — the config loader binds
-// struct fields, and a custom-typed int would need one.
+// Two values, and NEITHER is a default (ROADMAP P0-17). The rollout ladder this
+// type was built for — disabled → permissive → required — assumed live traffic
+// to migrate. There is none: the platform is not deployed. So the ladder is gone
+// and with it `permissive`, which was the only mode that accepted a request
+// carrying no workload credential at all.
+//
+// `permissive` is worth naming as removed rather than silently dropped, because
+// its own documentation said what it could not do: while the legacy HMAC was
+// still accepted, an attacker holding the shared secret simply omitted the
+// workload token. It bought migration safety and telemetry, not security. With
+// nothing to migrate it buys neither.
+//
+// It is a string rather than an int so it decodes straight from YAML and from an
+// environment variable with no viper decode hook.
 type Enforcement string
 
 const (
-	// Disabled performs no workload verification at all. It is the ZERO VALUE
-	// on purpose: a service that pulls this library and changes nothing keeps
-	// behaving exactly as it did, which is what makes the rollout additive
-	// rather than a fleet-wide behaviour change.
-	Disabled Enforcement = "disabled"
-
-	// Permissive verifies a credential that is present and lets a request
-	// without one through to the legacy HMAC path. This is rollout stage 1:
-	// every verifier accepts both credentials before any signer switches.
-	//
-	// It does NOT tolerate an invalid credential — only an absent one. That
-	// distinction is the same one platform/http/middleware.Optional makes, for
-	// the same reason: falling through on a bad credential hands an attacker a
-	// downgrade.
-	//
-	// Understand what it cannot do: while the legacy HMAC is still accepted, an
-	// attacker holding the shared secret simply omits the workload token. Stage
-	// 1 buys migration safety and telemetry, not security. Only Required does.
-	Permissive Enforcement = "permissive"
-
-	// Required rejects any request without a verified workload credential.
-	// This is rollout stage 3, and it may only be set for a service once
-	// telemetry proves every one of its callers emits the new token.
+	// Required rejects any request without a verified workload credential. This
+	// is the only posture that authenticates anything.
 	Required Enforcement = "required"
-)
 
-// normalize maps the zero value onto Disabled so the rest of the package can
-// compare against the named constants.
-func (e Enforcement) normalize() Enforcement {
-	if e == "" {
-		return Disabled
-	}
-	return e
-}
+	// Off performs no workload verification. It exists for a service with no
+	// authenticated surface, and it must be set EXPLICITLY — see Validate.
+	Off Enforcement = "off"
+)
 
 // Validate rejects an unrecognised enforcement mode.
 //
@@ -60,11 +45,21 @@ func (e Enforcement) normalize() Enforcement {
 // exactly how a security control gets switched off by accident. The test suite
 // pins the exact case with a deliberately misspelled value.
 func (e Enforcement) Validate() error {
-	switch e.normalize() {
-	case Disabled, Permissive, Required:
+	switch e {
+	case Required, Off:
 		return nil
+	case "":
+		// The EMPTY value is now an error, not a disable. It used to map to
+		// `disabled`, so a service nobody configured performed no workload
+		// verification — and nothing in the fleet configured it, which is how
+		// C-02 survived a completed implementation. Whether a service
+		// authenticates its callers is a deployment decision and must be stated,
+		// exactly as schema_mode must be (ROADMAP P0-4, the same defect shape).
+		return errors.New("workload: enforcement is required — set \"required\" on any service with an " +
+			"authenticated surface, or \"off\" explicitly on one without. It has no default, because a " +
+			"default is how this control ended up switched off everywhere")
 	default:
-		return fmt.Errorf("workload: unknown enforcement %q (want disabled, permissive or required)", string(e))
+		return fmt.Errorf("workload: unknown enforcement %q (want \"required\" or \"off\")", string(e))
 	}
 }
 
@@ -111,7 +106,8 @@ func (c VerifierConfig) Validate() error {
 	if err := c.Enforcement.Validate(); err != nil {
 		return err
 	}
-	if c.Enforcement.normalize() == Disabled {
+	if c.Enforcement == Off {
+		// Nothing else is needed: an explicitly-off verifier dials nothing.
 		return nil
 	}
 	if c.JwksURL == "" {

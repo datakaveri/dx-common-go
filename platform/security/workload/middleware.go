@@ -27,23 +27,26 @@ func Middleware(v *Verifier) func(http.Handler) http.Handler {
 			raw := bearerToken(r.Header.Get(HdrWorkload))
 
 			if raw == "" {
-				if mode == Required {
-					record(resultMissing, "", mode)
-					dxerrors.WriteError(w, dxerrors.NewUnauthorized("workload credential required"))
-					return
-				}
-				// Permissive: the legacy HMAC path carries this request.
-				record(resultLegacy, "", mode)
-				next.ServeHTTP(w, r)
+				// No fallback. This is the line that closes C-02 (ROADMAP
+				// P0-17): while a request with no workload credential could
+				// still proceed on the legacy HMAC path, an attacker holding
+				// the shared secret simply omitted the token, and every
+				// verifier in the fleet accepted it. There is nothing to fall
+				// back to now.
+				record(resultMissing, "", mode)
+				dxerrors.WriteError(w, dxerrors.NewUnauthorized("workload credential required"))
 				return
 			}
 
 			p, err := v.Verify(raw)
 			if err != nil {
-				// A credential that is PRESENT and invalid is fatal in EVERY
-				// mode, Permissive included. Falling through to the legacy path
-				// here would let a caller downgrade out of a failed check by
-				// sending a deliberately broken token.
+				// A credential that is present and invalid is fatal. This used
+				// to need saying because Permissive existed and falling through
+				// here would have let a caller downgrade out of a failed check
+				// by sending a deliberately broken token. With the fallback gone
+				// there is nowhere to fall through TO — but the test that pins
+				// it stays, because the property is what matters, not the reason
+				// it was once at risk.
 				record(resultRejected, "", mode)
 				dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid workload credential"))
 				return
@@ -67,11 +70,11 @@ func Middleware(v *Verifier) func(http.Handler) http.Handler {
 // only ever prove that SOMEBODY holding the shared secret called. Here the
 // identity is cryptographic and specific.
 //
-// It fails closed when no workload was verified, so it is only correct on a
-// service whose Middleware runs with enforcement enabled. Installing it while
-// enforcement is Disabled rejects every request — that is deliberate: a route
-// guard that silently allows everything because a control is switched off is
-// how the defect this replaces survived review.
+// It fails closed when no workload was verified. That used to carry a caveat —
+// "only correct on a service whose Middleware runs with enforcement enabled" —
+// which no longer applies: a verifier either enforces or does not exist
+// (ROADMAP P0-17), so there is no configuration in which this guard is installed
+// behind a switched-off control.
 func RequireCaller(ids ...string) func(http.Handler) http.Handler {
 	allowed := set(ids)
 	return func(next http.Handler) http.Handler {

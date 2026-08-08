@@ -23,7 +23,7 @@ import (
 func TestAuthOutcomesAreCounted(t *testing.T) {
 	kc := keycloak.New(t)
 	v := kc.Verifier("dx-acl-go", func(c *workload.VerifierConfig) {
-		c.Enforcement = workload.Permissive
+		c.Enforcement = workload.Required
 		c.SubjectAsserters = []string{"dx-gateway-go"}
 	})
 	mw := workload.Middleware(v)
@@ -39,9 +39,9 @@ func TestAuthOutcomesAreCounted(t *testing.T) {
 		{
 			name:    "no credential",
 			request: func() *http.Request { return request(t) },
-			result:  "legacy",
+			result:  "missing",
 			caller:  "unknown",
-			why:     "THE series stage 3 waits on: a caller still arriving on the shared HMAC",
+			why:     "was `legacy` — the series stage 3 waited on. There is no legacy path now (P0-17), so an absent credential is a rejection, not a migration signal",
 		},
 		{
 			name: "verified",
@@ -83,9 +83,9 @@ func TestAuthOutcomesAreCounted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			before := counterValue(t, tt.result, tt.caller, string(workload.Permissive))
+			before := counterValue(t, tt.result, tt.caller, string(workload.Required))
 			serve(t, mw, s.handler(), tt.request())
-			after := counterValue(t, tt.result, tt.caller, string(workload.Permissive))
+			after := counterValue(t, tt.result, tt.caller, string(workload.Required))
 
 			assert.Equal(t, before+1, after, tt.why)
 		})

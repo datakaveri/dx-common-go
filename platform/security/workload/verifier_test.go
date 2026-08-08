@@ -262,7 +262,7 @@ func TestNewVerifierRejectsUnsafeConfiguration(t *testing.T) {
 		{
 			name: "disabled",
 			cfg: workload.VerifierConfig{
-				Enforcement: workload.Disabled,
+				Enforcement: workload.Off,
 				JwksURL:     kc.JWKSURL(),
 				Issuer:      kc.Issuer(),
 				Service:     "dx-acl-go",
@@ -306,7 +306,7 @@ func TestVerifyReportsAbsenceDistinctlyFromInvalidity(t *testing.T) {
 		"absent and invalid are different outcomes: the mode decides what absence means, invalidity is always fatal")
 }
 
-func TestFromConfigReturnsNilWhenDisabled(t *testing.T) {
+func TestFromConfigReturnsNilWhenExplicitlyOff(t *testing.T) {
 	kc := keycloak.New(t)
 
 	tests := []struct {
@@ -319,11 +319,11 @@ func TestFromConfigReturnsNilWhenDisabled(t *testing.T) {
 		{
 			name:    "zero value",
 			cfg:     workload.VerifierConfig{},
-			wantNil: true,
-			why:     "the shipped default for every service that has not turned this on",
+			wantErr: true,
+			why:     "an UNSET mode is now an error, not a silent disable. It used to be the shipped default for every service, which is exactly how C-02 survived a completed implementation (P0-17)",
 		},
 		{
-			name:    "explicitly disabled, with the rest configured",
+			name:    "explicitly off, with the rest configured",
 			cfg:     kc.VerifierConfig("dx-acl-go"),
 			wantNil: true,
 			why:     "an operator switching it off must not leave a live verifier behind",
@@ -332,11 +332,11 @@ func TestFromConfigReturnsNilWhenDisabled(t *testing.T) {
 			name:    "a typo in the mode",
 			cfg:     workload.VerifierConfig{Enforcement: "permisive"},
 			wantErr: true,
-			why:     "a misspelled mode must be a startup error, never a silent downgrade to disabled",
+			why:     "a misspelled mode must be a startup error, never a silent downgrade",
 		},
 	}
 	// The second case starts from a valid config and switches the mode off.
-	tests[1].cfg.Enforcement = workload.Disabled
+	tests[1].cfg.Enforcement = workload.Off
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
