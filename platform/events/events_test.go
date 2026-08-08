@@ -72,7 +72,7 @@ func TestGroupMembersShareTheWork(t *testing.T) {
 
 // A version mismatch must DROP, not retry: a consumer that cannot read a
 // payload will never be able to, and retrying buries the failures that matter.
-func TestVersionMismatchDrops(t *testing.T) {
+func TestVersionMismatchQuarantines(t *testing.T) {
 	bus := events.NewMemory()
 	v2 := events.NewTopic[policyCreated]("policy.created").V(2)
 
@@ -81,15 +81,15 @@ func TestVersionMismatchDrops(t *testing.T) {
 
 	// A v1 publisher on the same topic.
 	err := policyTopic.Publish(context.Background(), bus, policyCreated{PolicyID: "p"})
-	if !errors.Is(err, events.ErrDrop) {
-		t.Fatalf("err = %v, want ErrDrop for a version mismatch", err)
+	if !errors.Is(err, events.ErrQuarantine) {
+		t.Fatalf("err = %v, want ErrQuarantine for a version mismatch — an unreadable version must be preserved, not destroyed", err)
 	}
 	if called {
 		t.Error("the handler ran on a payload written at a different version")
 	}
 }
 
-func TestUndecodablePayloadDrops(t *testing.T) {
+func TestUndecodablePayloadQuarantines(t *testing.T) {
 	bus := events.NewMemory()
 
 	// A topic whose payload type cannot accept what the other publishes.
@@ -102,8 +102,8 @@ func TestUndecodablePayloadDrops(t *testing.T) {
 	_ = otherTopic.Subscribe(bus, "g", func(context.Context, other) error { called = true; return nil })
 
 	err := policyTopic.Publish(context.Background(), bus, policyCreated{PolicyID: "not-a-number"})
-	if !errors.Is(err, events.ErrDrop) {
-		t.Fatalf("err = %v, want ErrDrop for an undecodable payload", err)
+	if !errors.Is(err, events.ErrQuarantine) {
+		t.Fatalf("err = %v, want ErrQuarantine for an undecodable payload — the body is the only evidence of what the producer sent", err)
 	}
 	if called {
 		t.Error("the handler ran on a payload it could not decode")

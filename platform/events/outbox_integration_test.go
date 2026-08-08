@@ -25,7 +25,12 @@ CREATE TABLE IF NOT EXISTS test_outbox (
     payload    jsonb NOT NULL,
     attempts   int NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
-    sent_at    timestamptz
+    sent_at    timestamptz,
+    -- The lease (ROADMAP P0-5). A claim is exclusive until claimed_until, and
+    -- mark-sent requires the token the claim minted.
+    claimed_by    text,
+    claimed_until timestamptz,
+    claim_token   text
 );
 CREATE TABLE IF NOT EXISTS test_policy (
     id text PRIMARY KEY

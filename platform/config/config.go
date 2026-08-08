@@ -111,7 +111,19 @@ func Load[T any](opts Options) (*T, error) {
 	// AutomaticEnv, so bind them explicitly — otherwise a value that exists
 	// ONLY in the environment is silently dropped, which is the most confusing
 	// possible failure in a container.
+	//
+	// The key set comes from T by reflection, NOT from v.AllKeys(). AllKeys()
+	// is the union of what viper already knows — defaults, the file, and prior
+	// binds — so it cannot contain a struct-only key by construction: that is
+	// the definition of the set needing rescue. Binding AllKeys() alone bound
+	// exactly the keys that did not need it (ROADMAP P0-3 / review H-01).
+	//
+	// AllKeys() is still bound as well, for keys that live in the file but not
+	// in the struct.
 	var out T
+	for _, key := range Keys[T]() {
+		_ = v.BindEnv(key)
+	}
 	for _, key := range v.AllKeys() {
 		_ = v.BindEnv(key)
 	}
@@ -137,7 +149,14 @@ type Base struct {
 	Server       Server       `mapstructure:"server"`
 	SchemaMode   string       `mapstructure:"schema_mode"`
 	InternalAuth InternalAuth `mapstructure:"internal_auth"`
-	OpenAPI      OpenAPI      `mapstructure:"openapi"`
+	// GRPC is the internal service-to-service surface. Port 0 means the service
+	// serves no gRPC, which is the default and most services' answer.
+	//
+	// Plain ints and a duration, deliberately: config is L0 and must stay a
+	// leaf, so the server's own package owns behaviour while this owns only the
+	// values (the AD-015 / H-01 trap).
+	GRPC    GRPC    `mapstructure:"grpc"`
+	OpenAPI OpenAPI `mapstructure:"openapi"`
 }
 
 // Configurer is implemented by any config that embeds Base, so bootstrap can
@@ -196,6 +215,13 @@ type InternalAuth struct {
 	HeaderMaxAge time.Duration `mapstructure:"header_max_age"`
 }
 
+// GRPC configures the internal gRPC surface.
+type GRPC struct {
+	Port            int           `mapstructure:"port"`
+	MaxRecvMsgSize  int           `mapstructure:"max_recv_msg_size"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+}
+
 // OpenAPI controls spec validation and the docs UI.
 type OpenAPI struct {
 	SwaggerUIEnabled  bool   `mapstructure:"swagger_ui_enabled"`
@@ -215,7 +241,17 @@ func PlatformDefaults() map[string]any {
 		"server.idle_timeout":     "120s",
 		"server.shutdown_timeout": "20s",
 		"server.max_body_bytes":   1 << 20, // 1 MiB
-		"schema_mode":             "migrate",
+		// schema_mode has NO default, deliberately (ROADMAP P0-4 / review H-02).
+		// It used to default to "migrate", which meant an unconfigured pod
+		// applied DDL and N replicas raced each other for golang-migrate's
+		// advisory lock. AD-012 makes the mode configuration; a default made it
+		// a decision taken by omission, and omission chose the dangerous value.
+		//
+		// Declared with an empty value so the key still exists and still binds
+		// from the environment. Only a service that declares migrations is
+		// required to set it — bootstrap fails the boot there, naming the
+		// choice, and ignores it entirely for the services that apply no DDL.
+		"schema_mode": "",
 		// Declared with empty defaults so the keys exist in AllKeys and are
 		// therefore env-bindable. Viper only binds a variable for a key it
 		// already knows, and a key present ONLY in the struct — absent from
@@ -252,8 +288,13 @@ func PlatformDefaults() map[string]any {
 		"workload_issuer.client_secret":       "",
 		"workload_issuer.request_timeout":     0,
 		"workload_issuer.refresh_skew":        0,
-		"openapi.swagger_ui_enabled":          true,
-		"openapi.swagger_ui_path":             "/docs",
+		// Internal gRPC. Port 0 = no gRPC surface, which is every service's
+		// default until it declares one.
+		"grpc.port":                  0,
+		"grpc.max_recv_msg_size":     0,
+		"grpc.shutdown_timeout":      0,
+		"openapi.swagger_ui_enabled": true,
+		"openapi.swagger_ui_path":    "/docs",
 		// Validation defaults ON: an unvalidated request is how a spec and its
 		// implementation drift apart without anyone noticing.
 		"openapi.validate_requests": true,

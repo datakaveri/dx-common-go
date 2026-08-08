@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -96,7 +97,12 @@ func TestShutdownOrder(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	base := config.Base{}
-	base.Server.Port = 0 // ephemeral
+	// A REAL free port. `Port = 0` does not mean ephemeral here — addr() maps 0
+	// to the platform default 8080 — and this line used to claim it did. The
+	// test passed anyway only because serve() swallowed the resulting bind
+	// error and returned nil (ROADMAP P0-7), so it was asserting shutdown
+	// ordering on a server that had never started.
+	base.Server.Port = freePort(t)
 	base.Server.ShutdownTimeout = 5 * time.Second
 
 	done := make(chan error, 1)
@@ -275,14 +281,14 @@ func TestDepPolicy(t *testing.T) {
 // silently skipping the schema.
 func TestMigrationsWithoutADatabaseIsAWiringError(t *testing.T) {
 	deps := Deps{Migrations: Migrations(nil, "migrations", "schema_migrations_test")}
-	err := runMigrations(context.Background(), deps, config.Base{}, zap.NewNop())
+	err := runMigrations(context.Background(), deps, config.Base{}, zap.NewNop(), modeServe)
 	if err == nil {
 		t.Error("declaring migrations with no Postgres dependency must be an error")
 	}
 }
 
 func TestNoMigrationsIsNotAnError(t *testing.T) {
-	if err := runMigrations(context.Background(), Deps{}, config.Base{}, zap.NewNop()); err != nil {
+	if err := runMigrations(context.Background(), Deps{}, config.Base{}, zap.NewNop(), modeServe); err != nil {
 		t.Errorf("a service with no migrations must boot: %v", err)
 	}
 }
@@ -304,4 +310,18 @@ func indexOf(ss []string, s string) int {
 		}
 	}
 	return -1
+}
+
+// freePort returns a port nothing is listening on.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatalf("release probe listener: %v", err)
+	}
+	return port
 }

@@ -1,8 +1,6 @@
 package sql
 
 import (
-	stderrors "errors"
-
 	"github.com/datakaveri/dx-common-go/platform/errors"
 )
 
@@ -77,11 +75,28 @@ func MapError(err error) error {
 	return errors.Wrap(err, errors.CodeDatabase, "database error")
 }
 
-// IsRetryable reports whether err is a concurrency failure worth re-running.
+// IsRetryable reports whether err is a concurrency failure worth re-running a
+// whole transaction for.
+//
+// ONLY 40001 (serialization failure) and 40P01 (deadlock detected). Those are
+// the two outcomes where the SAME work, run again, can legitimately succeed.
+//
+// It used to fall through to errors.IsRetryable, which is true for anything
+// classified CodeDatabase — and Classify() wraps every unrecognised pg error as
+// CodeDatabase. So a constraint violation, a broken migration, a malformed
+// query and a dead connection were all "retryable", and DoRetry re-ran the
+// entire callback three times over an error that could never succeed
+// (ROADMAP P0-8 / review finding H-06). With side effects in that callback,
+// each attempt repeated them.
+//
+// The generic transport-level notion of retryable is a different question with
+// a different answer — whether an HTTP caller should try again — and conflating
+// the two is what made this broad. errors.IsRetryable still exists and is still
+// right for that.
 func IsRetryable(err error) bool {
 	switch pgErrorCode(err) {
 	case sqlstateSerializationFail, sqlstateDeadlock:
 		return true
 	}
-	return errors.IsRetryable(err) && !stderrors.Is(err, errors.ErrNotFound)
+	return false
 }

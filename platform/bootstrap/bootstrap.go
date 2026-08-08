@@ -46,6 +46,22 @@ type Spec[C config.Configurer] struct {
 	Version string
 	Config  config.Options
 
+	// Load overrides how the configuration is read. Nil means config.Load,
+	// which is what a service with nothing special to do wants.
+	//
+	// It exists because five services wrote their own `config.Load` wrapper —
+	// promoting legacy environment names onto canonical ones, splitting a
+	// comma-separated list, defaulting one secret from another — and NONE of it
+	// ran, because bootstrap called config.Load directly and only ever took the
+	// service's Options. The wrappers were dead code at boot while every test
+	// exercised them, which is the worst possible arrangement: the behaviour
+	// was covered, just not in the binary. `dx-files-connect-api-go` could not
+	// start in ANY environment as a result (ROADMAP P0-3).
+	//
+	// The signature is deliberately identical to config.Load's instantiation,
+	// so adopting it is `Load: config.Load` and nothing else.
+	Load func(config.Options) (*C, error)
+
 	// Deps is evaluated once, after config load, so dependency selection can
 	// branch on configuration — events only when cfg.RabbitMQ.Enabled, say.
 	Deps func(*C) Deps
@@ -54,6 +70,30 @@ type Spec[C config.Configurer] struct {
 	// returns the root handler. Called exactly once, after every dependency has
 	// been resolved or degraded. This is the ONLY service-specific code in main.
 	Wire func(context.Context, *App[C]) (http.Handler, error)
+
+	// GRPC returns the service's internal gRPC surface, already constructed.
+	// Nil means the service serves no gRPC and no socket is opened.
+	//
+	// It returns an INTERFACE, and the service builds the concrete server with
+	// platform/grpc/server.New. That indirection is not ceremony: bootstrap is
+	// imported by every service's main, so importing the gRPC server here links
+	// gRPC into all 24 modules — which broke dx-notification-go's build
+	// outright, exactly as platform/http/middleware → workload → resilience →
+	// gRPC did during P0-2 and forced the issuer package to be split out.
+	// Inverting it means only a service that actually serves gRPC pays for it.
+	//
+	// Called after Wire, so the implementation can close over the object graph
+	// Wire built, and before serve, so a misconfigured surface fails the boot
+	// rather than leaving the service half-listening.
+	GRPC func(*App[C]) (Servable, error)
+}
+
+// Servable is a long-running listener bootstrap supervises. It exists so the
+// gRPC server can join the shutdown sequence without bootstrap knowing what
+// gRPC is.
+type Servable interface {
+	// Serve blocks until ctx is cancelled, then stops gracefully.
+	Serve(ctx context.Context) error
 }
 
 // Deps is the dependency set. A nil field means the service does not use it;
@@ -117,6 +157,7 @@ type App[C config.Configurer] struct {
 
 	Health *health.Registry
 
+	grpc     Servable
 	group    *errgroup.Group
 	groupCtx context.Context
 	closers  []closer
@@ -159,6 +200,65 @@ func (a *App[C]) Closer(name string, fn func(context.Context) error) {
 // automatically; call this only for a service-specific check.
 func (a *App[C]) Probe(name string, c health.Checker) { a.Health.Add(name, c) }
 
+// bootModeEnv selects what the process does with the image it was started from.
+//
+// One enum rather than a boolean per mode: these are mutually exclusive roles
+// for the same binary, and independent booleans leave "both set" undefined the
+// moment a third mode appears.
+//
+// DX_-prefixed on purpose. Every configuration key in this platform is
+// unprefixed (AD-010), so the prefix marks this as an operational role rather
+// than a setting, and makes it obvious in a manifest that it is not one.
+const bootModeEnv = "DX_BOOT_MODE"
+
+// Boot modes. Unset means modeServe, so the normal path needs no variable.
+const (
+	// modeServe loads config, resolves dependencies and serves. The default.
+	modeServe = "serve"
+
+	// modeConfigCheck loads and validates configuration, then exits 0 without
+	// dialling a dependency or binding a port.
+	//
+	// It exists so a RENDERED environment can be tested: helm template, take
+	// the resulting environment, run the real image, get a verdict without a
+	// database, a broker or an object store in reach. That is the only way to
+	// tell "this deployment's config is wrong" apart from "this deployment
+	// cannot reach its dependencies", and until ROADMAP P0-3 those were
+	// indistinguishable — both showed up as a pod that would not start.
+	modeConfigCheck = "config-check"
+
+	// modeMigrateOnly applies migrations and exits 0 without serving.
+	//
+	// This is the ArgoCD PreSync Job's role (ROADMAP P0-4). The Job runs the
+	// SAME image as the service — migrations are embedded in the binary, so a
+	// different image would apply a different schema than the code expects —
+	// and without this mode it migrates and then starts serving, so the hook
+	// never completes and burns its activeDeadlineSeconds instead.
+	//
+	// A mode rather than a per-service `migrate` subcommand: ten repositories
+	// would each need one, and the eleventh service to declare migrations is
+	// the one that would forget.
+	modeMigrateOnly = "migrate-only"
+)
+
+// bootMode reads the mode, defaulting to serve.
+//
+// An unrecognised value is an ERROR, not a fallback to serving. A typo in an
+// operational role must stop the process: a PreSync Job that silently served
+// instead of migrating would hang the sync, and a pod that silently migrated
+// instead of serving is the defect this item exists to remove.
+func bootMode() (string, error) {
+	switch m := os.Getenv(bootModeEnv); m {
+	case "", modeServe:
+		return modeServe, nil
+	case modeConfigCheck, modeMigrateOnly:
+		return m, nil
+	default:
+		return "", fmt.Errorf("%s=%q is not a boot mode (want %q, %q or %q)",
+			bootModeEnv, m, modeServe, modeConfigCheck, modeMigrateOnly)
+	}
+}
+
 // Run boots, serves and shuts down. It does not return: exit 0 on a clean
 // shutdown, exit 1 on any Required failure.
 func Run[C config.Configurer](spec Spec[C]) {
@@ -172,17 +272,42 @@ func Run[C config.Configurer](spec Spec[C]) {
 
 // run is Run without the exit, so it is testable.
 func run[C config.Configurer](spec Spec[C]) error {
+	// 0. What role is this process playing? Read before anything else, so a
+	//    typo fails immediately rather than after a config load that may itself
+	//    fail for an unrelated reason and mask it.
+	mode, err := bootMode()
+	if err != nil {
+		return err
+	}
+
 	// 1. Signals first, so ^C during migration is clean rather than a half-
 	//    applied schema.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// 2. Config. No logger exists yet, so a failure here goes to stderr.
-	cfg, err := config.Load[C](spec.Config)
+	load := spec.Load
+	if load == nil {
+		load = config.Load[C]
+	}
+	cfg, err := load(spec.Config)
 	if err != nil {
 		return err
 	}
 	base := (*cfg).PlatformConfig()
+
+	// 2a. config-check stops here: the configuration decoded and passed
+	//     Validate(), which is the whole verdict this mode exists to give.
+	//
+	//     Deliberately an environment variable and not a flag: the thing under
+	//     test is an image plus an environment, and adding a flag would mean
+	//     overriding the container's command, which changes what is being
+	//     tested. Deliberately not a config key either — it must be readable
+	//     before any config exists.
+	if mode == modeConfigCheck {
+		fmt.Fprintf(os.Stderr, "%s: config ok (%s=%s — not starting)\n", spec.Name, bootModeEnv, mode)
+		return nil
+	}
 
 	// 3. Logger. THE FIX: it cannot precede config, because bootstrap owns both.
 	log, err := newLogger(base.LogLevel, spec.Name, spec.Version)
@@ -204,9 +329,25 @@ func run[C config.Configurer](spec Spec[C]) error {
 	// 4. Migrations, before the pool. DDL takes locks, and no repository may be
 	//    handed a pool whose schema is not yet current.
 	if deps.Migrations != nil {
-		if err := runMigrations(ctx, deps, base, log); err != nil {
+		if err := runMigrations(ctx, deps, base, log, mode); err != nil {
 			return err
 		}
+	}
+
+	// 4a. migrate-only stops here — the PreSync Job's whole job is done.
+	//
+	//     A service with no migrations declared that is started in this mode is
+	//     an ERROR, not a no-op success: a Job enabled against a service that
+	//     applies no DDL would report a migration that never happened, and the
+	//     rollout would proceed believing the schema is current.
+	if mode == modeMigrateOnly {
+		if deps.Migrations == nil {
+			return fmt.Errorf("%s=%s but this service declares no migrations — "+
+				"nothing would be applied and the deploy would proceed as if it had",
+				bootModeEnv, modeMigrateOnly)
+		}
+		log.Info("migrations applied; exiting", zap.String("mode", mode))
+		return nil
 	}
 
 	// 5. Stores.
@@ -229,6 +370,23 @@ func run[C config.Configurer](spec Spec[C]) error {
 	handler, err := spec.Wire(ctx, app)
 	if err != nil {
 		return fmt.Errorf("wire: %w", err)
+	}
+
+	// 6a. The internal gRPC surface, if the service declares one. After Wire so
+	//     the registrars can close over the object graph it built, and BEFORE
+	//     serve so a misconfigured gRPC surface fails the boot rather than
+	//     leaving the service half-listening.
+	//
+	//     It is handed the SAME workload verifier and the SAME internal-auth
+	//     secret the HTTP side uses. Two identity configurations for one process
+	//     would mean the P0-2 rollout could land on one transport and not the
+	//     other, which is indistinguishable from it having landed.
+	if spec.GRPC != nil {
+		gsrv, gerr := spec.GRPC(app)
+		if gerr != nil {
+			return fmt.Errorf("grpc server: %w", gerr)
+		}
+		app.grpc = gsrv
 	}
 
 	return app.serve(ctx, handler, base)
@@ -274,6 +432,13 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 		return nil
 	})
 
+	// The gRPC listener shares the errgroup and the same cancellation, so it
+	// drains in the SAME ordered shutdown as HTTP rather than racing it — the
+	// defect this bootstrap exists to prevent, arriving on a second socket.
+	if a.grpc != nil {
+		g.Go(func() error { return a.grpc.Serve(gctx) })
+	}
+
 	// Wait for a signal or the first worker failure.
 	<-gctx.Done()
 	a.Log.Info("shutting down")
@@ -297,10 +462,23 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 	//     server is still accepting requests that depend on it.
 	stopWorkers()
 
-	// (c) Wait for in-flight work to finish.
-	if err := a.group.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		a.Log.Error("worker stopped with an error", zap.Error(err))
-	}
+	// (c) Wait for in-flight work to finish, BOUNDED.
+	//
+	// Two defects lived in these three lines (ROADMAP P0-7 / review H-05):
+	//
+	//   - The error was logged and then discarded, and serve() ended in
+	//     `return nil`. So a worker whose failure means the service is no
+	//     longer doing its job — and a failure to BIND THE PORT, which arrives
+	//     through this same errgroup — exited 0. Kubernetes reads that as
+	//     Completed, not CrashLoopBackOff: a service that never started looks
+	//     exactly like one that shut down cleanly.
+	//   - It was the only phase outside the timeout budget. Steps (a) and (d)
+	//     both bound their work; a worker that never returns hung shutdown here
+	//     until the orchestrator's grace period expired and SIGKILL landed.
+	//
+	// The error is captured, not returned yet: the closers below must still run
+	// so infrastructure is released either way.
+	workerErr := a.waitForWorkers(timeout)
 
 	// (d) Close infrastructure, LIFO — the reverse of construction, so nothing
 	//     is closed while something that depends on it is still open.
@@ -313,8 +491,38 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 		}
 	}
 
+	if workerErr != nil {
+		// Non-nil here means the process must exit non-zero. Run() prints it
+		// and calls os.Exit(1).
+		return workerErr
+	}
 	a.Log.Info("stopped")
 	return nil
+}
+
+// waitForWorkers waits for the errgroup within the shutdown budget.
+//
+// A worker that ignores its context must not be able to hang the process: the
+// budget expires, the failure is named, and shutdown continues. That is worse
+// than a clean stop and better than hanging until SIGKILL, which produces no
+// diagnosis at all.
+func (a *App[C]) waitForWorkers(timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- a.group.Wait() }()
+
+	select {
+	case err := <-done:
+		// context.Canceled is the NORMAL path: stopWorkers cancelled them.
+		if err != nil && !errors.Is(err, context.Canceled) {
+			a.Log.Error("worker stopped with an error", zap.Error(err))
+			return err
+		}
+		return nil
+	case <-time.After(timeout):
+		a.Log.Error("workers did not stop within the shutdown budget",
+			zap.Duration("timeout", timeout))
+		return fmt.Errorf("workers did not stop within %s", timeout)
+	}
 }
 
 const (

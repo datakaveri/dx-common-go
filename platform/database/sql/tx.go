@@ -89,14 +89,21 @@ func (m *manager) Do(ctx context.Context, fn func(context.Context) error, opts .
 		}
 	}()
 
-	if err := fn(withTx(ctx, tx)); err != nil {
+	// A fresh hook set per attempt: DoRetry re-runs fn, and hooks registered by
+	// an attempt that failed must be discarded with it rather than firing later.
+	h := &hooks{}
+	if err := fn(withHooks(withTx(ctx, tx), h)); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	committed = true
-	return nil
+
+	// Post-commit effects. The transaction is durable at this point, so a hook
+	// failure is reported but cannot undo it — which is exactly why work the
+	// commit depends on must NOT be registered here.
+	return h.run(ctx)
 }
 
 const (

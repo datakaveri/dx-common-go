@@ -24,7 +24,7 @@ import (
 //
 // The runner opens and closes its own connection, so nothing is left holding a
 // migration-scoped session once the schema is current.
-func runMigrations(_ context.Context, deps Deps, base config.Base, log *zap.Logger) error {
+func runMigrations(_ context.Context, deps Deps, base config.Base, log *zap.Logger, bootMode string) error {
 	m := deps.Migrations
 	if m == nil || deps.Postgres == nil {
 		// Migrations without a database is a wiring mistake worth naming rather
@@ -36,8 +36,31 @@ func runMigrations(_ context.Context, deps Deps, base config.Base, log *zap.Logg
 	}
 
 	mode := base.SchemaMode
+
+	// The PreSync Job's whole reason to exist is to apply DDL, so it does not
+	// need to be told twice. This also removes the failure that motivated
+	// ROADMAP P0-4's third defect: the Job and the pods read the same env map,
+	// and a SCHEMA_MODE=none aimed at pods used to be able to turn the Job into
+	// a silent no-op that exited 0 and let the rollout proceed against an
+	// un-migrated schema.
+	if bootMode == modeMigrateOnly {
+		mode = dxmigrate.ModeMigrate
+	}
+
+	// No default. schema_mode used to default to "migrate" here AND in
+	// platform/config, so a service that was never configured applied DDL from
+	// every replica and raced the others for the advisory lock (ROADMAP P0-4 /
+	// review H-02). AD-012 says the mode is configuration; defaulting it meant
+	// the mode was decided by omission, and omission chose the dangerous value.
+	//
+	// Only services that actually declare migrations are affected — this line
+	// is unreachable for the other eight.
 	if mode == "" {
-		mode = "migrate"
+		return fmt.Errorf(
+			"schema_mode is required: this service applies migrations, so it must be told whether to. "+
+				"Set schema_mode=%q on the actor that owns the schema (locally, the service itself; "+
+				"in Kubernetes, the PreSync migration Job) and schema_mode=%q everywhere else",
+			dxmigrate.ModeMigrate, dxmigrate.ModeNone)
 	}
 
 	cfg := dxmigrate.Config{

@@ -3,8 +3,12 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"time"
+
+	"github.com/google/uuid"
 
 	dxsql "github.com/datakaveri/dx-common-go/platform/database/sql"
 )
@@ -31,14 +35,41 @@ import (
 type Outbox struct {
 	db    dxsql.DB
 	table string
+
+	// owner identifies THIS dispatcher in claimed_by. Per-process, so an
+	// abandoned lease is attributable to the replica that died holding it.
+	owner string
+
+	// lease is how long a claim is exclusive for. It must exceed the time to
+	// publish a batch: a lease that expires mid-publish lets a second
+	// dispatcher republish rows the first is still working through, which is
+	// the defect this replaces, only slower.
+	lease time.Duration
 }
 
 // NewOutbox builds an outbox over table.
 //
 // table is interpolated into SQL — a table name cannot be a bind parameter —
 // so it MUST be a compile-time constant. Never derive it from input.
-func NewOutbox(db dxsql.DB, table string) *Outbox {
-	return &Outbox{db: db, table: table}
+// OutboxOption adjusts an Outbox.
+type OutboxOption func(*Outbox)
+
+// WithLease sets how long a claim stays exclusive. It must exceed the time to
+// publish a batch; see Outbox.lease.
+func WithLease(d time.Duration) OutboxOption {
+	return func(o *Outbox) {
+		if d > 0 {
+			o.lease = d
+		}
+	}
+}
+
+func NewOutbox(db dxsql.DB, table string, opts ...OutboxOption) *Outbox {
+	o := &Outbox{db: db, table: table, owner: newOwnerID(), lease: DefaultLease}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
 }
 
 // Write records an event for later publication.
@@ -76,27 +107,44 @@ type pending struct {
 	id    string
 	topic string
 	event Event
+	// token is the claim this row was leased under. markSent requires it, so a
+	// dispatcher that lost its lease cannot mark another's row sent.
+	token string
 }
 
-// claim atomically takes up to limit unsent rows.
+// claim takes up to limit rows and LEASES them.
 //
-// FOR UPDATE SKIP LOCKED is what makes this safe to run on every replica: each
-// dispatcher takes a disjoint set, so N replicas drain N times faster instead
-// of publishing each event N times.
+// The previous implementation relied on FOR UPDATE SKIP LOCKED alone and
+// asserted that N dispatchers therefore took disjoint batches. That holds only
+// for the duration of the one statement: the row locks are released when it
+// ends, publication happens afterwards, and sent_at is still NULL — so a second
+// dispatcher re-selects exactly the same rows and publishes them again
+// (ROADMAP P0-5 / review finding H-03).
+//
+// The lease closes that window. A row is claimable only when unsent AND
+// unleased-or-expired, and mark-sent requires the token this claim minted, so a
+// dispatcher whose lease expired while it was publishing cannot mark a row sent
+// that another dispatcher now owns.
 func (o *Outbox) claim(ctx context.Context, limit int) ([]pending, error) {
+	token := uuid.NewString()
 	rows, err := o.db.Query(ctx, fmt.Sprintf(`
 		WITH claimed AS (
 			SELECT id FROM %s
 			 WHERE sent_at IS NULL
+			   AND (claimed_until IS NULL OR claimed_until < now())
 			 ORDER BY created_at
 			 LIMIT $1
 			 FOR UPDATE SKIP LOCKED
 		)
 		UPDATE %s o
-		   SET attempts = o.attempts + 1
+		   SET attempts      = o.attempts + 1,
+		       claimed_by    = $2,
+		       claimed_until = now() + make_interval(secs => $3),
+		       claim_token   = $4
 		  FROM claimed c
 		 WHERE o.id = c.id
-	 RETURNING o.id, o.topic, o.payload`, o.table, o.table), limit)
+	 RETURNING o.id, o.topic, o.payload`, o.table, o.table),
+		limit, o.owner, o.lease.Seconds(), token)
 	if err != nil {
 		return nil, fmt.Errorf("outbox: claim: %w", err)
 	}
@@ -106,6 +154,7 @@ func (o *Outbox) claim(ctx context.Context, limit int) ([]pending, error) {
 	for rows.Next() {
 		var p pending
 		var body []byte
+		p.token = token
 		if err := rows.Scan(&p.id, &p.topic, &body); err != nil {
 			return nil, fmt.Errorf("outbox: scan: %w", err)
 		}
@@ -113,7 +162,7 @@ func (o *Outbox) claim(ctx context.Context, limit int) ([]pending, error) {
 			// A row that will never decode must not be claimed forever. It is
 			// marked sent and reported, not retried — the alternative is a
 			// dispatcher that stalls on one bad row and delivers nothing.
-			if merr := o.markSent(ctx, p.id); merr != nil {
+			if merr := o.markSent(ctx, p.id, token); merr != nil {
 				return nil, merr
 			}
 			continue
@@ -123,13 +172,45 @@ func (o *Outbox) claim(ctx context.Context, limit int) ([]pending, error) {
 	return out, rows.Err()
 }
 
-func (o *Outbox) markSent(ctx context.Context, id string) error {
-	_, err := o.db.Exec(ctx,
-		fmt.Sprintf(`UPDATE %s SET sent_at = now() WHERE id = $1`, o.table), id)
+// markSent marks a row sent, but ONLY if this dispatcher still holds its lease.
+//
+// The token check is what makes the lease meaningful. Without it a dispatcher
+// whose lease expired mid-publish would still mark the row sent — after another
+// dispatcher had already re-claimed and republished it — and the duplicate
+// would be invisible.
+//
+// It returns ErrLeaseLost when the row was re-claimed, which the caller treats
+// as a warning rather than a failure: the event is not lost, it is being
+// handled by whoever holds the lease now.
+func (o *Outbox) markSent(ctx context.Context, id, token string) error {
+	affected, err := o.db.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s SET sent_at = now(), claimed_until = NULL
+		  WHERE id = $1 AND claim_token = $2`, o.table), id, token)
 	if err != nil {
 		return fmt.Errorf("outbox: mark sent: %w", err)
 	}
+	if affected == 0 {
+		return fmt.Errorf("%w: row %s", ErrLeaseLost, id)
+	}
 	return nil
+}
+
+// ErrLeaseLost signals that a row was re-claimed by another dispatcher before
+// this one finished with it.
+var ErrLeaseLost = errors.New("outbox: lease lost")
+
+// DefaultLease is how long a claim is exclusive for. Generous relative to a
+// publish, because the cost of a too-SHORT lease is a duplicate publish and the
+// cost of a too-long one is only delay after a crash.
+const DefaultLease = 60 * time.Second
+
+// newOwnerID identifies this dispatcher process in claimed_by.
+func newOwnerID() string {
+	host, err := os.Hostname()
+	if err != nil {
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s/%d/%s", host, os.Getpid(), uuid.NewString()[:8])
 }
 
 // Dispatcher drains an outbox to a bus.
@@ -220,10 +301,18 @@ func (d *Dispatcher) drain(ctx context.Context) (int, error) {
 			d.log.Warn("outbox publish failed; will retry", "id", p.id, "topic", p.topic, "err", err)
 			continue
 		}
-		if err := d.outbox.markSent(ctx, p.id); err != nil {
-			// Published but not marked: the next pass republishes it. That is
-			// at-least-once, which is the contract — consumers deduplicate on
-			// Event.ID.
+		if err := d.outbox.markSent(ctx, p.id, p.token); err != nil {
+			if errors.Is(err, ErrLeaseLost) {
+				// Another dispatcher re-claimed this row while we were
+				// publishing, so it may be published twice. That is
+				// at-least-once, which is the contract — consumers deduplicate
+				// on Event.ID — but a steady rate here means the lease is too
+				// short for how long a publish actually takes.
+				d.log.Warn("outbox lease lost before mark-sent; possible duplicate", "id", p.id, "topic", p.topic)
+				continue
+			}
+			// Published but not marked: the next pass republishes it. Same
+			// at-least-once contract.
 			d.log.Error("outbox published but not marked sent", "id", p.id, "err", err)
 		}
 	}

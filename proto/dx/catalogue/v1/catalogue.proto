@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+// Package dx.catalogue.v1 is the catalogue's internal contract.
+//
+// This is the FIRST Go-owned gRPC contract in the platform. It deliberately
+// does not extend org.cdpg.dx.auth.appid.v1 (grpc/appidpb), which is the JAVA
+// control plane's AppIdVerificationService — that service bundles four
+// unrelated jobs (VerifyAppId and ResolveDelegation are identity, CheckItemAccess
+// is an authorization decision, GetItem is this) and is being removed.
+package dx.catalogue.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/cataloguepb;cataloguepb";
+
+// CatalogueService serves item metadata to other platform services.
+//
+// Internal only. External catalogue access goes through the gateway to
+// dx-catalogue-go's REST surface; this exists so services do not have to.
+service CatalogueService {
+  // GetItem returns one item by id.
+  //
+  // The SUBJECT is not a field: it travels as signed X-Subject-* metadata and
+  // is verified by the platform interceptor, exactly as on the HTTP path. A
+  // caller-supplied user id in the message body would be an unauthenticated
+  // claim, which is the class of defect ADR-06 exists to remove.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+}
+
+message GetItemRequest {
+  // Item id (UUID).
+  string item_id = 1;
+}
+
+message GetItemResponse {
+  // False when no item exists for the id. Callers must check it: a zero-valued
+  // Item is not the same as a missing one.
+  bool found = 1;
+
+  Item item = 2;
+}
+
+// Item is the subset of a catalogue document other services consume. It is
+// deliberately NOT the whole document: a contract that mirrors the storage
+// shape makes every catalogue field an API commitment.
+message Item {
+  string id = 1;
+  // Item type, e.g. DATABANK.
+  string type = 2;
+  string name = 3;
+  string description = 4;
+  // The owning provider's user id (UUID).
+  string owner_user_id = 5;
+  string organization_id = 6;
+  string organization_name = 7;
+  string access_policy = 8;
+}

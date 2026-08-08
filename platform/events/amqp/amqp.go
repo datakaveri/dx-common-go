@@ -35,6 +35,7 @@ package amqp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -210,20 +211,34 @@ func (b *Bus) dispatch(topic, group string, h events.Handler) dxmq.Handler {
 	return func(ctx context.Context, d dxmq.Delivery) dxmq.Outcome {
 		var e events.Event
 		if err := json.Unmarshal(d.Body, &e); err != nil {
-			// Unparseable: acknowledge and drop. Neither requeue nor DLQ helps
-			// — there is no structured payload to inspect on replay, and
-			// requeuing would spin the same bytes forever.
-			b.log.Error("amqp: undecodable event dropped",
+			// Unparseable: DEAD-LETTER, do not acknowledge. The previous
+			// comment here reasoned that "there is no structured payload to
+			// inspect on replay" — but the raw BODY is exactly what is worth
+			// keeping, and acknowledging destroyed it (ROADMAP P0-6). Requeue
+			// would indeed spin the same bytes forever; the DLQ is the third
+			// option that was missing.
+			b.log.Error("amqp: undecodable event quarantined",
 				zap.String("topic", topic), zap.String("group", group), zap.Error(err))
-			return dxmq.Ack
+			return dxmq.DeadLetter
 		}
 
 		switch err := h(ctx, e); {
 		case err == nil:
 			return dxmq.Ack
+		case isQuarantine(err):
+			// Business data this consumer cannot read — a version ahead of it,
+			// or a payload that will not decode. It must not be retried and it
+			// must not be discarded, so it goes to the DLQ with its body
+			// intact, where its depth is an alertable signal and an operator
+			// can replay it once a compatible reader ships.
+			b.log.Error("amqp: event quarantined",
+				zap.String("topic", topic), zap.String("group", group),
+				zap.String("id", e.ID), zap.Int("version", e.Version), zap.Error(err))
+			return dxmq.DeadLetter
 		case isDrop(err):
-			// The handler declared this will never succeed — a version it
-			// cannot read, say. Retrying buries the failures that matter.
+			// Deliberate, documented noise. This is now the ONLY path that
+			// destroys a message, and reaching it requires a handler to say so
+			// explicitly with ErrDrop.
 			b.log.Warn("amqp: event dropped by handler",
 				zap.String("topic", topic), zap.String("id", e.ID), zap.Error(err))
 			return dxmq.Ack
@@ -239,19 +254,15 @@ func (b *Bus) dispatch(topic, group string, h events.Handler) dxmq.Handler {
 }
 
 // isDrop reports whether the handler asked for the message to be discarded.
-func isDrop(err error) bool {
-	for err != nil {
-		if err == events.ErrDrop {
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
-}
+//
+// errors.Is, not a hand-rolled unwrap loop: the previous version compared with
+// == at each level, which misses any sentinel wrapped by a type implementing
+// Is() rather than Unwrap().
+func isDrop(err error) bool { return errors.Is(err, events.ErrDrop) }
+
+// isQuarantine reports whether the message must be preserved for inspection
+// and replay rather than acknowledged.
+func isQuarantine(err error) bool { return errors.Is(err, events.ErrQuarantine) }
 
 // Close stops every consumer and the publisher.
 //

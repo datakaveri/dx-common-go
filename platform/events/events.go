@@ -40,6 +40,21 @@ import (
 // failures that matter.
 var ErrDrop = errors.New("events: drop this message")
 
+// ErrQuarantine tells the consumer to REJECT a message to the dead-letter
+// queue, keeping its body for inspection and replay.
+//
+// It is the difference between "this message is noise" and "this message is
+// business data I cannot read", and until ROADMAP P0-6 the platform had only
+// the first. An unrecognised version and an undecodable body were both returned
+// as ErrDrop and acknowledged, so an authorization event that arrived one
+// version ahead of its consumer was destroyed silently — while the envelope's
+// own documentation said an unrecognised version "must fail loudly".
+//
+// Use ErrDrop only for noise you can name in a comment. Anything carrying
+// business meaning that this consumer cannot process is ErrQuarantine: the
+// message stops being deliverable, but it does not stop existing.
+var ErrQuarantine = errors.New("events: quarantine this message")
+
 // Event is the wire envelope. Every message carries it, so a consumer can
 // always answer what/when/which-version without the payload's cooperation.
 type Event struct {
@@ -106,18 +121,24 @@ func (t Topic[T]) Publish(ctx context.Context, b Bus, payload T, opts ...Option)
 
 // Subscribe registers a typed handler.
 //
-// Decoding happens here, so a handler never sees bytes. A payload that will
-// not decode, or carries an unexpected version, is DROPPED rather than
-// retried — neither will ever succeed, and retrying them buries real failures.
+// Decoding happens here, so a handler never sees bytes. A payload that will not
+// decode, or carries an unexpected version, is QUARANTINED rather than retried:
+// neither will ever succeed on retry, and retrying buries real failures — but
+// neither may be discarded either, because both are business data this consumer
+// simply cannot read yet (ROADMAP P0-6).
 func (t Topic[T]) Subscribe(b Bus, group string, h func(context.Context, T) error) error {
 	return b.Subscribe(t.name, group, func(ctx context.Context, e Event) error {
 		if e.Version != t.version {
+			// A version this consumer does not recognise is the case the
+			// envelope documents as "must fail loudly". Quarantine IS loud:
+			// the message is preserved, the DLQ depth moves, and it can be
+			// replayed once a compatible reader is deployed.
 			return fmt.Errorf("%w: %s expects version %d, got %d",
-				ErrDrop, t.name, t.version, e.Version)
+				ErrQuarantine, t.name, t.version, e.Version)
 		}
 		var payload T
 		if err := json.Unmarshal(e.Payload, &payload); err != nil {
-			return fmt.Errorf("%w: decoding %s: %v", ErrDrop, t.name, err)
+			return fmt.Errorf("%w: decoding %s: %v", ErrQuarantine, t.name, err)
 		}
 		return h(ctx, payload)
 	})
