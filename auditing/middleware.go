@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/datakaveri/dx-common-go/transport/clientip"
+
 	"github.com/datakaveri/dx-common-go/auth"
 	dxmw "github.com/datakaveri/dx-common-go/middleware"
 )
@@ -85,16 +87,12 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// clientIP prefers chi's RealIP-rewritten RemoteAddr; strips the port.
+// clientIP derives the caller's address in a way the caller cannot choose.
+//
+// It used to return RemoteAddr, which chi's RealIP has already rewritten from
+// the client-supplied X-Forwarded-For — so this audit field recorded whatever
+// address the caller asked it to, in an audit trail whose purpose is
+// attribution (ROADMAP P1-4).
 func clientIP(req *http.Request) string {
-	host := req.RemoteAddr
-	for i := len(host) - 1; i >= 0; i-- {
-		if host[i] == ':' {
-			return host[:i]
-		}
-		if host[i] == ']' { // IPv6 without port
-			break
-		}
-	}
-	return host
+	return clientip.From(req, 0)
 }

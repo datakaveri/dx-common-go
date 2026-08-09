@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dxerrors "github.com/datakaveri/dx-common-go/errors"
+	"github.com/datakaveri/dx-common-go/transport/clientip"
 	"golang.org/x/time/rate"
 )
 
@@ -17,6 +18,14 @@ type RateLimitConfig struct {
 	BurstSize         int
 	// Use user ID from context for per-user limits (if empty, use IP)
 	PerUser bool
+	// TrustedProxyHops is how many proxies sit in front of this service, used
+	// to find the caller's address in X-Forwarded-For. Zero uses
+	// clientip.DefaultTrustedHops.
+	//
+	// Getting it WRONG IS A BUG IN ONE DIRECTION OR THE OTHER, which is why it
+	// is explicit: too high and a caller can forge the address the limiter
+	// keys on, too low and every caller collapses into the ingress's bucket.
+	TrustedProxyHops int
 }
 
 // RateLimiter manages per-IP or per-user rate limiting
@@ -75,12 +84,15 @@ func (rl *RateLimiter) getKey(r *http.Request) string {
 		}
 	}
 
-	// Fall back to IP-based limiting
-	ip := r.Header.Get("X-Forwarded-For")
-	if ip == "" {
-		ip = r.RemoteAddr
-	}
-	return "ip:" + ip
+	// Fall back to IP-based limiting.
+	//
+	// Via clientip, NEVER the raw header. This used to read
+	// r.Header.Get("X-Forwarded-For") directly, so a client that sent its own
+	// X-Forwarded-For got a fresh limiter per request — rate limiting was
+	// bypassable by anyone who read this function (ROADMAP P1-4). Falling back
+	// to r.RemoteAddr was no better, because chi's RealIP has already rewritten
+	// it from that same header.
+	return "ip:" + clientip.From(r, rl.cfg.TrustedProxyHops)
 }
 
 // Middleware returns chi-compatible rate limiting middleware

@@ -7,6 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+
+	"github.com/datakaveri/dx-common-go/transport/clientip"
 	"go.uber.org/zap"
 )
 
@@ -18,6 +20,12 @@ import (
 func StandardStack(logger *zap.Logger, timeout time.Duration) func(chi.Router) {
 	return func(r chi.Router) {
 		r.Use(RequestID())
+		// Capture BEFORE RealIP: RealIP overwrites RemoteAddr from a
+		// client-supplied header, and transport/clientip needs the real
+		// transport peer as its fallback or that fallback is forgeable too
+		// (ROADMAP P1-4).
+		r.Use(clientip.Capture)
+		//nolint:staticcheck // SA1019: deprecated for the spoofing described above; its output is for LOGS, not decisions — use transport/clientip for those
 		r.Use(chimw.RealIP)
 		r.Use(Logger(logger))
 		r.Use(CORS(DefaultCORSConfig()))
@@ -33,6 +41,12 @@ func StandardStack(logger *zap.Logger, timeout time.Duration) func(chi.Router) {
 func StandardGin(logger *zap.Logger, timeout time.Duration) []gin.HandlerFunc {
 	return []gin.HandlerFunc{
 		Wrap(RequestID()),
+		// Capture BEFORE RealIP: RealIP overwrites RemoteAddr from a
+		// client-supplied header, and transport/clientip needs the real
+		// transport peer as its fallback or that fallback is forgeable too
+		// (ROADMAP P1-4).
+		Wrap(clientip.Capture),
+		//nolint:staticcheck // SA1019: deprecated for the spoofing described above; its output is for LOGS, not decisions — use transport/clientip for those
 		Wrap(chimw.RealIP),
 		Wrap(Logger(logger)),
 		Wrap(CORS(DefaultCORSConfig())),

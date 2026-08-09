@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
+
+	"github.com/datakaveri/dx-common-go/transport/clientip"
 )
 
 // This file is the standard middleware stack every service gets from
@@ -83,9 +85,22 @@ func globalStack(log *zap.Logger, cors CORSConfig) []func(http.Handler) http.Han
 		// whole request including the time spent in the rest of the stack.
 		otelhttp.NewMiddleware("http.server"),
 		requestID,
+		// Capture BEFORE RealIP, and the order is load-bearing. RealIP
+		// overwrites RemoteAddr with a value taken from a client-supplied
+		// header, destroying the one address that cannot be forged; Capture
+		// stashes the real transport peer first so anything making a SECURITY
+		// decision (rate-limit keys, audit attribution) has something
+		// trustworthy to fall back to. Swap these two and transport/clientip's
+		// fallback silently becomes attacker-controlled (ROADMAP P1-4).
+		clientip.Capture,
 		// RealIP rewrites RemoteAddr from X-Forwarded-For / X-Real-IP. Every
 		// service here sits behind the gateway, so without it the request log
 		// records the gateway's address for every caller.
+		//
+		// It takes the LEFTMOST X-Forwarded-For entry, which is the one a
+		// remote client can write, so its output is fit for a log line and not
+		// for a decision. Use transport/clientip for the latter.
+		//nolint:staticcheck // SA1019: deprecated for exactly the spoofing described above; kept for logs, see clientip
 		middleware.RealIP,
 		requestLogger(log),
 		corsMiddleware(cors),
