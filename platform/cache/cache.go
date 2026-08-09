@@ -254,6 +254,17 @@ func (s *scope) Allow(ctx context.Context, key string, limit int, window time.Du
 	if limit <= 0 {
 		return false, 0, nil
 	}
+	// A zero window is an integer DIVIDE BY ZERO on the line below — a panic on
+	// the request path, reached from a configuration value (ROADMAP P1-4 /
+	// review M-04). Refusing is the safe direction: a limiter with no window
+	// cannot count, and allowing would be an unmetered path that looks limited.
+	//
+	// This is the low-level primitive and is deliberately still permissive
+	// about its arguments; platform/ratelimit is where a policy is VALIDATED at
+	// construction so this can never be reached with a bad one.
+	if window <= 0 {
+		return false, 0, fmt.Errorf("cache: rate-limit window must be positive, got %v", window)
+	}
 	slot := time.Now().UnixNano() / int64(window)
 	windowKey := fmt.Sprintf("%s%s%d", s.Key(key), keySeparator, slot)
 
