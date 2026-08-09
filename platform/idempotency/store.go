@@ -167,6 +167,43 @@ func (s *Store) Release(ctx context.Context, scope, key string) error {
 	return nil
 }
 
+// Stale returns the keys in scope that have been `executing` longer than age.
+//
+// It exists so a caller can RESOLVE a stranded key rather than only discard it,
+// which Reclaim alone cannot do. The distinction matters: Reclaim frees the key
+// for a fresh attempt, but if the original attempt's side effect DID commit,
+// the right outcome is to complete the key with that result so a retry replays
+// it — one order, not two. Only the service knows how to look for that
+// evidence, so this hands it the keys and stays out of the decision.
+//
+// Ordered oldest-first: a reconciler that can only process part of a backlog
+// should clear the keys that have been stuck longest, since those are the ones
+// whose owners have been unable to retry.
+func (s *Store) Stale(ctx context.Context, scope string, age time.Duration) ([]string, error) {
+	rows, err := s.db.Query(ctx, fmt.Sprintf(
+		`SELECT key FROM %s
+		  WHERE scope = $1 AND status = '%s' AND created_at < now() - make_interval(secs => $2)
+		  ORDER BY created_at`,
+		s.table, statusExecuting), scope, age.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("idempotency: stale: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("idempotency: stale scan: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("idempotency: stale: %w", err)
+	}
+	return keys, nil
+}
+
 // Reclaim deletes `executing` rows older than age — the reconciliation hook for
 // keys stranded by a crash between side effect and Complete.
 //
