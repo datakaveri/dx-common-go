@@ -63,6 +63,11 @@ func NewReliablePublisher(cfg PublisherConfig) (*ReliablePublisher, error) {
 // PublishOptions carries optional per-message metadata.
 type PublishOptions struct {
 	MessageID string
+	// Headers are merged onto the message's application headers, after trace
+	// context is injected. A key that collides with a trace header loses —
+	// corrupting trace propagation to carry an application value would be a
+	// silent observability outage.
+	Headers map[string]any
 }
 
 // Publish sends body to exchange/routingKey, redialing and retrying once if
@@ -76,6 +81,11 @@ func (p *ReliablePublisher) Publish(ctx context.Context, exchange, routingKey st
 
 	headers := amqp.Table{}
 	injectTraceContext(ctx, headers)
+	for k, v := range opts.Headers {
+		if _, taken := headers[k]; !taken {
+			headers[k] = v
+		}
+	}
 	pub := amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,

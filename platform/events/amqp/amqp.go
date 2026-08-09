@@ -182,7 +182,7 @@ func (b *Bus) Subscribe(topic, group string, h events.Handler) error {
 	}
 	b.mu.Unlock()
 
-	queue := group + "." + topic
+	queue := queueName(topic, group)
 	runner := dxmq.NewConsumerRunner(dxmq.ConsumerConfig{
 		URL:           b.cfg.URL,
 		Queue:         queue,
@@ -205,6 +205,13 @@ func (b *Bus) Subscribe(topic, group string, h events.Handler) error {
 	go runner.Run(b.ctx, b.dispatch(topic, group, h))
 	return nil
 }
+
+// queueName is the durable queue for a subscription.
+//
+// One definition, because DLQName derives from it: an operator tool that
+// computed the queue name differently from Subscribe would inspect a queue that
+// does not exist and report an empty quarantine.
+func queueName(topic, group string) string { return group + "." + topic }
 
 // dispatch adapts an events.Handler to the runner's Outcome vocabulary.
 func (b *Bus) dispatch(topic, group string, h events.Handler) dxmq.Handler {
