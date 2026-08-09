@@ -1,11 +1,39 @@
-// Package headers signs and verifies the internal subject headers the gateway
-// mints for upstream services.
+// Package headers carries the internal subject headers naming the END USER an
+// internal call speaks for.
 //
-// Why: the gateway validates the user's JWT, but forwarding that JWT to every
-// upstream is a leak surface and couples each service to Keycloak availability.
-// Instead, the gateway extracts the resolved user and signs a small set of
-// X-Subject-* headers with an HMAC. Upstreams trust the gateway's signature
-// and skip the JWT round-trip.
+// # Why these headers are no longer signed
+//
+// They used to carry an HMAC over id|email|roles|org|issued_at, and every
+// service held the same shared secret. That signature did two jobs, and only
+// one of them was real:
+//
+//   - It authenticated the CALLER — implicitly, as "somebody holding the
+//     secret". That is what review finding C-02 identified as broken, and it is
+//     replaced by platform/security/workload's audience-bound credential, which
+//     names a specific workload cryptographically.
+//   - It protected SUBJECT INTEGRITY — which upstream may say which user a
+//     request speaks for. That job is now done by the asserter list: a verified
+//     workload may assert a subject only if the receiving service names it in
+//     workload_verifier.subject_asserters.
+//
+// Removing the signature is not a weakening, and the reason is specific rather
+// than reassuring:
+//
+//   - Every asserter held the SAME secret, so the signature proved membership of
+//     a group, never identity. It could not distinguish the gateway from any
+//     other service, which is exactly the authority C-02 is about. An explicit
+//     asserter list checked against a cryptographic caller identity is strictly
+//     stronger than a signature every caller can produce.
+//   - The workload credential is itself a bearer token sent in plaintext
+//     (ADR-06 §3.1 defers mTLS; the mesh terminates TLS). Anyone positioned to
+//     rewrite X-Subject-Id in transit can already read and replay that token, so
+//     the HMAC protected nothing the threat model does not already concede.
+//
+// The consequence a reader must not miss: THESE HEADERS ARE ONLY TRUSTWORTHY
+// BEHIND A VERIFIED WORKLOAD. Parse does no authentication — it cannot, there is
+// nothing to check. auth/resolver enforces that by refusing to read them unless
+// a verified workload principal is on the request context, so a service with no
+// verifier cannot accidentally trust a client-supplied X-Subject-Id.
 //
 // Headers minted:
 //
@@ -13,97 +41,76 @@
 //	X-Subject-Email       optional
 //	X-Subject-Roles       comma-joined realm roles
 //	X-Subject-Org-Id      organisation the user belongs to
-//	X-Subject-Issued-At   Unix seconds when these headers were minted
-//	X-Subject-Sig         hex(HMAC-SHA256(canonical, shared_secret))
 //	X-Agent-Subject       acting agent (RFC 8693 act.sub) — delegated calls only
 //	X-Delegation-Id       delegation grant reference — delegated calls only
 //
-// The signature covers the canonical string:
-//
-//	id|email|roles|org|issued_at                          (direct user call)
-//	id|email|roles|org|issued_at|agent_sub|delegation_id  (delegated agent call)
-//
-// Replay protection: Verify rejects anything older than MaxAge (default 60s).
-// Rotate the shared secret by accepting two keys during rollover.
+// ROADMAP P0-17 stage 2; ADR-06.
 package headers
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/datakaveri/dx-common-go/auth"
-	dxerrors "github.com/datakaveri/dx-common-go/errors"
 )
 
 // Header names — exported so callers can also strip/inspect them.
 const (
-	HdrSubjectID       = "X-Subject-Id"
-	HdrSubjectEmail    = "X-Subject-Email"
-	HdrSubjectRoles    = "X-Subject-Roles"
-	HdrSubjectOrgID    = "X-Subject-Org-Id"
-	HdrSubjectIssuedAt = "X-Subject-Issued-At"
-	HdrSubjectSig      = "X-Subject-Sig"
+	HdrSubjectID    = "X-Subject-Id"
+	HdrSubjectEmail = "X-Subject-Email"
+	HdrSubjectRoles = "X-Subject-Roles"
+	HdrSubjectOrgID = "X-Subject-Org-Id"
 	// Agent headers are minted only for delegated (agent-acting) requests.
 	HdrAgentSubject = "X-Agent-Subject"
 	HdrDelegationID = "X-Delegation-Id"
 )
 
-// DefaultMaxAge is the validity window applied when Config.MaxAge is zero.
-const DefaultMaxAge = 60 * time.Second
-
-// Config controls Signer/Verifier behaviour.
-type Config struct {
-	// Secret is the active HMAC key used by Sign and accepted by Verify.
-	Secret []byte
-	// AdditionalSecrets are also accepted during Verify (for key rotation).
-	// Sign always uses Secret.
-	AdditionalSecrets [][]byte
-	// MaxAge bounds how stale headers can be. Defaults to 60s.
-	MaxAge time.Duration
+// All is every header this package mints.
+//
+// It exists so an edge that must STRIP client-supplied subject headers cannot
+// miss one: the gateway does exactly that, and a header it forgot to strip is a
+// header a client can set. Adding a header above without adding it here is the
+// mistake this list prevents.
+var All = []string{
+	HdrSubjectID, HdrSubjectEmail, HdrSubjectRoles,
+	HdrSubjectOrgID, HdrAgentSubject, HdrDelegationID,
 }
 
-// ErrNotSigned indicates the request has no X-Subject-Sig header.
-var ErrNotSigned = errors.New("request has no subject signature")
+// ErrNoSubject indicates the request asserts no subject at all.
+//
+// It is NOT an authentication failure: a service calling on its own behalf
+// legitimately asserts no user, and the handler decides whether it needs one.
+var ErrNoSubject = errors.New("request asserts no subject")
 
-// ErrInvalidSignature indicates a signature mismatch (or expired headers).
-var ErrInvalidSignature = errors.New("invalid subject signature")
+// ErrInvalidSubject indicates subject headers that are present but malformed.
+var ErrInvalidSubject = errors.New("invalid subject headers")
 
-// Sign returns the X-Subject-* headers for a user. Caller copies them onto
-// the outgoing request via h.Set(name, value).
-func Sign(user auth.DxUser, cfg Config) (http.Header, error) {
-	if len(cfg.Secret) == 0 {
-		return nil, errors.New("headers.Sign: Secret is required")
-	}
+// Project returns the X-Subject-* headers naming user. The caller copies them
+// onto the outgoing request with Apply.
+func Project(user auth.DxUser) (http.Header, error) {
 	// A blank subject id would authenticate an anonymous principal downstream
 	// (and could match records with an empty owner). Refuse to mint it.
 	if strings.TrimSpace(user.ID) == "" {
-		return nil, errors.New("headers.Sign: user ID is required")
+		return nil, errors.New("headers.Project: user ID is required")
 	}
-	// The canonical string is '|'-separated; a field containing '|' is rejected
-	// as defence-in-depth against any field-shifting ambiguity.
-	if containsSeparator(user.ID, user.Email, user.OrganisationID, user.AgentSubject, user.DelegationID) || rolesContainSeparator(user.Roles) {
-		return nil, errors.New("headers.Sign: subject fields must not contain '|'")
+	// Roles are comma-joined into one header, so a role containing a comma
+	// would split into two on the far side. Reject rather than silently
+	// fabricate a role the user does not hold.
+	for _, r := range user.Roles {
+		if strings.Contains(r, ",") {
+			return nil, errors.New("headers.Project: a role must not contain ','")
+		}
 	}
-	now := time.Now().Unix()
-	rolesJoined := joinRoles(user.Roles)
-	canonical := canonicalString(user.ID, user.Email, rolesJoined, user.OrganisationID, user.AgentSubject, user.DelegationID, now)
-	sig := hmacHex(cfg.Secret, canonical)
 
 	h := http.Header{}
 	h.Set(HdrSubjectID, user.ID)
 	if user.Email != "" {
 		h.Set(HdrSubjectEmail, user.Email)
 	}
-	if rolesJoined != "" {
-		h.Set(HdrSubjectRoles, rolesJoined)
+	if joined := joinRoles(user.Roles); joined != "" {
+		h.Set(HdrSubjectRoles, joined)
 	}
 	if user.OrganisationID != "" {
 		h.Set(HdrSubjectOrgID, user.OrganisationID)
@@ -114,103 +121,67 @@ func Sign(user auth.DxUser, cfg Config) (http.Header, error) {
 	if user.DelegationID != "" {
 		h.Set(HdrDelegationID, user.DelegationID)
 	}
-	h.Set(HdrSubjectIssuedAt, strconv.FormatInt(now, 10))
-	h.Set(HdrSubjectSig, sig)
 	return h, nil
 }
 
-// Apply copies all signed headers onto an outbound request, overwriting any
+// Apply copies projected headers onto an outbound request, overwriting any
 // existing values for those header names.
-func Apply(req *http.Request, signed http.Header) {
-	for k := range signed {
-		req.Header.Set(k, signed.Get(k))
+func Apply(req *http.Request, projected http.Header) {
+	for k := range projected {
+		req.Header.Set(k, projected.Get(k))
 	}
 }
 
-// Verify checks the signature + freshness and returns the user encoded in
-// the headers.
-func Verify(h http.Header, cfg Config) (auth.DxUser, error) {
-	sig := h.Get(HdrSubjectSig)
-	if sig == "" {
-		return auth.DxUser{}, ErrNotSigned
-	}
-
-	issued := h.Get(HdrSubjectIssuedAt)
-	issuedAt, err := strconv.ParseInt(issued, 10, 64)
-	if err != nil {
-		return auth.DxUser{}, fmt.Errorf("%w: bad issued_at", ErrInvalidSignature)
-	}
-
-	maxAge := cfg.MaxAge
-	if maxAge == 0 {
-		maxAge = DefaultMaxAge
-	}
-	age := time.Since(time.Unix(issuedAt, 0))
-	if age < -10*time.Second || age > maxAge {
-		return auth.DxUser{}, fmt.Errorf("%w: outside validity window (age=%s)", ErrInvalidSignature, age)
-	}
-
-	id := h.Get(HdrSubjectID)
-	email := h.Get(HdrSubjectEmail)
-	roles := h.Get(HdrSubjectRoles)
-	org := h.Get(HdrSubjectOrgID)
-	agentSub := h.Get(HdrAgentSubject)
-	delegationID := h.Get(HdrDelegationID)
-	// Even a validly-signed blank id must not authenticate a principal.
-	if strings.TrimSpace(id) == "" {
-		return auth.DxUser{}, fmt.Errorf("%w: empty subject id", ErrInvalidSignature)
-	}
-	canonical := canonicalString(id, email, roles, org, agentSub, delegationID, issuedAt)
-
-	if !verifyAgainst(cfg.Secret, canonical, sig) {
-		for _, alt := range cfg.AdditionalSecrets {
-			if verifyAgainst(alt, canonical, sig) {
-				return makeUser(id, email, roles, org, agentSub, delegationID), nil
-			}
-		}
-		return auth.DxUser{}, ErrInvalidSignature
-	}
-	return makeUser(id, email, roles, org, agentSub, delegationID), nil
-}
-
-// Middleware verifies subject headers on inbound requests and injects the
-// resolved DxUser into the request context. Requests without a signature
-// (or with an invalid one) get 401.
+// Strip removes every subject header from h.
 //
-// Upstreams that sit *behind* the gateway use this middleware instead of
-// validating the JWT themselves.
-func Middleware(cfg Config) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user, err := Verify(r.Header, cfg)
-			if err != nil {
-				dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid or missing subject headers"))
-				return
-			}
-			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))
-		})
+// An edge that accepts requests from outside MUST call this before projecting
+// its own, or a client can name whichever user it likes. The gateway does; this
+// is the function that makes "did we strip them all" answerable in one place.
+func Strip(h http.Header) {
+	for _, name := range All {
+		h.Del(name)
 	}
+}
+
+// Parse reads the subject headers.
+//
+// It performs NO authentication and cannot: there is nothing to verify. The
+// authority to assert these headers is established BEFORE this is reached, by
+// platform/security/workload's verifier and its asserter list. Calling Parse on
+// a request whose caller has not been verified trusts whatever the client sent.
+func Parse(h http.Header) (auth.DxUser, error) {
+	id := h.Get(HdrSubjectID)
+	if strings.TrimSpace(id) == "" {
+		return auth.DxUser{}, ErrNoSubject
+	}
+	return auth.DxUser{
+		ID:             id,
+		Email:          h.Get(HdrSubjectEmail),
+		Roles:          splitRoles(h.Get(HdrSubjectRoles)),
+		OrganisationID: h.Get(HdrSubjectOrgID),
+		AgentSubject:   h.Get(HdrAgentSubject),
+		DelegationID:   h.Get(HdrDelegationID),
+	}, nil
+}
+
+// Asserts reports whether h claims to speak for a user.
+//
+// Used by the workload gate to decide whether the asserter check applies, so it
+// must agree with Parse about what "asserts a subject" means — hence one
+// definition here rather than a repeated h.Get(...) != "" in three packages.
+func Asserts(h http.Header) bool {
+	return strings.TrimSpace(h.Get(HdrSubjectID)) != ""
 }
 
 // --- internals --------------------------------------------------------------
-
-// canonicalString builds the signed payload. The agent fields are appended
-// only when present so signatures over plain user requests stay byte-identical
-// to those minted before agent support existed — services rebuild at different
-// times and a rebuilt gateway must remain verifiable by an older upstream.
-func canonicalString(id, email, roles, org, agentSub, delegationID string, issuedAt int64) string {
-	fields := []string{id, email, roles, org, strconv.FormatInt(issuedAt, 10)}
-	if agentSub != "" || delegationID != "" {
-		fields = append(fields, agentSub, delegationID)
-	}
-	return strings.Join(fields, "|")
-}
 
 func joinRoles(roles []string) string {
 	if len(roles) == 0 {
 		return ""
 	}
-	// Sort so callers can't accidentally vary order and break verification.
+	// Sorted so the projection is deterministic — it makes a header diff in a
+	// trace or a test comparison stable, which is the only property still
+	// wanted now that nothing signs over it.
 	sorted := append([]string(nil), roles...)
 	sort.Strings(sorted)
 	return strings.Join(sorted, ",")
@@ -220,53 +191,12 @@ func splitRoles(joined string) []string {
 	if joined == "" {
 		return nil
 	}
-	return strings.Split(joined, ",")
-}
-
-func hmacHex(key []byte, data string) string {
-	m := hmac.New(sha256.New, key)
-	m.Write([]byte(data))
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-func verifyAgainst(key []byte, canonical, expected string) bool {
-	if len(key) == 0 {
-		return false
-	}
-	got, err := hex.DecodeString(expected)
-	if err != nil {
-		return false
-	}
-	m := hmac.New(sha256.New, key)
-	m.Write([]byte(canonical))
-	return hmac.Equal(m.Sum(nil), got)
-}
-
-func containsSeparator(fields ...string) bool {
-	for _, f := range fields {
-		if strings.Contains(f, "|") {
-			return true
+	parts := strings.Split(joined, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
-	return false
-}
-
-func rolesContainSeparator(roles []string) bool {
-	for _, r := range roles {
-		if strings.ContainsAny(r, "|,") {
-			return true
-		}
-	}
-	return false
-}
-
-func makeUser(id, email, roles, org, agentSub, delegationID string) auth.DxUser {
-	return auth.DxUser{
-		ID:             id,
-		Email:          email,
-		Roles:          splitRoles(roles),
-		OrganisationID: org,
-		AgentSubject:   agentSub,
-		DelegationID:   delegationID,
-	}
+	return out
 }

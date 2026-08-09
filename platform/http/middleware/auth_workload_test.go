@@ -26,8 +26,6 @@ import (
 // runs BEFORE subject resolution, and that adding it changes nothing for a
 // service that has not enabled it.
 
-const testHMACSecret = "dev-shared-secret"
-
 type realm struct {
 	srv *httptest.Server
 	key *rsa.PrivateKey
@@ -83,16 +81,16 @@ func (r *realm) verifier(t *testing.T, service string, asserters ...string) *wor
 	return v
 }
 
-// signedSubject builds the gateway-signed identity headers a request carries
-// today, so these tests exercise the real legacy path rather than a stand-in.
-func signedSubject(t *testing.T, r *http.Request, userID string) {
+// assertSubject puts the internal identity headers on a request, exactly as the
+// gateway projects them. They are UNSIGNED (ROADMAP P0-17 stage 2), so what
+// makes them trustworthy is the workload credential alongside them — which is
+// precisely what these tests vary.
+func assertSubject(t *testing.T, r *http.Request, userID string) {
 	t.Helper()
-	signed, err := dxheaders.Sign(
-		auth.DxUser{ID: userID, Email: userID + "@example.org", Roles: []string{"consumer"}},
-		dxheaders.Config{Secret: []byte(testHMACSecret)},
-	)
+	h, err := dxheaders.Project(
+		auth.DxUser{ID: userID, Email: userID + "@example.org", Roles: []string{"consumer"}})
 	require.NoError(t, err)
-	dxheaders.Apply(r, signed)
+	dxheaders.Apply(r, h)
 }
 
 type observed struct {
@@ -110,22 +108,33 @@ func (o *observed) handler() http.Handler {
 	})
 }
 
-// The additive guarantee: 16 services configure AuthConfig today and none sets
-// Workload. Every one of them must behave exactly as before.
-func TestResolveWithoutWorkloadVerifierIsUnchanged(t *testing.T) {
+// TestResolveWithoutWorkloadVerifierRejectsSubjectHeaders is the INVERSE of the
+// test it replaces, and the inversion is the whole of P0-17 stage 2.
+//
+// The old test asserted an additive guarantee: "16 services configure AuthConfig
+// today and none sets Workload; every one of them must behave exactly as
+// before" — i.e. a service with no verifier still honoured signed subject
+// headers. With the signature deleted, honouring them would mean ANY client
+// could name ANY user by setting one header. So a service with no verifier now
+// accepts no subject at all.
+//
+// This is the failure mode the design makes unspellable: there is no
+// configuration in which subject headers are trusted without a verified caller.
+func TestResolveWithoutWorkloadVerifierRejectsSubjectHeaders(t *testing.T) {
 	obs := &observed{}
-	mw := middleware.Resolve(middleware.AuthConfig{HMACSecret: testHMACSecret})
+	mw := middleware.Resolve(middleware.AuthConfig{TrustSubjectHeaders: true})
 
 	r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
-	signedSubject(t, r, "user-1")
+	assertSubject(t, r, "user-1")
 
 	rec := httptest.NewRecorder()
 	mw(obs.handler()).ServeHTTP(rec, r)
 
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.True(t, obs.served)
-	assert.Equal(t, "user-1", obs.subject.ID)
-	assert.Empty(t, obs.caller.ID, "no verifier means no workload identity is fabricated")
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"with no workload verifier there is nothing authenticating the caller, so a "+
+			"client-supplied X-Subject-Id must not be honoured")
+	assert.False(t, obs.served)
+	assert.Empty(t, obs.subject.ID)
 }
 
 // TestResolveRequiresAWorkloadCredential replaces
@@ -139,27 +148,27 @@ func TestResolveWithoutWorkloadVerifierIsUnchanged(t *testing.T) {
 func TestResolveRequiresAWorkloadCredential(t *testing.T) {
 	kc := newRealm(t)
 	cfg := middleware.AuthConfig{
-		HMACSecret: testHMACSecret,
-		Workload:   kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
+		TrustSubjectHeaders: true,
+		Workload:            kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
 	}
 
-	t.Run("legacy HMAC alone is rejected", func(t *testing.T) {
+	t.Run("subject headers alone are rejected", func(t *testing.T) {
 		obs := &observed{}
 		r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
-		signedSubject(t, r, "user-1")
+		assertSubject(t, r, "user-1")
 
 		rec := httptest.NewRecorder()
 		middleware.Resolve(cfg)(obs.handler()).ServeHTTP(rec, r)
 
 		require.Equal(t, http.StatusUnauthorized, rec.Code,
-			"a valid HMAC must no longer be sufficient — that sufficiency IS C-02")
+			"subject headers must never be sufficient on their own — that sufficiency IS C-02")
 		assert.False(t, obs.served, "the handler ran on a request with no workload credential")
 	})
 
 	t.Run("workload token resolves both identities", func(t *testing.T) {
 		obs := &observed{}
 		r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
-		signedSubject(t, r, "user-1")
+		assertSubject(t, r, "user-1")
 		r.Header.Set(workload.HdrWorkload, "Bearer "+kc.token(t, "dx-gateway-go", "dx-acl-go"))
 
 		rec := httptest.NewRecorder()
@@ -180,19 +189,19 @@ func TestWorkloadGateRunsBeforeSubjectResolution(t *testing.T) {
 	obs := &observed{}
 
 	mw := middleware.Resolve(middleware.AuthConfig{
-		HMACSecret: testHMACSecret,
-		Workload:   kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
+		TrustSubjectHeaders: true,
+		Workload:            kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
 	})
 
 	r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
-	signedSubject(t, r, "user-1") // a perfectly valid HMAC signature...
+	assertSubject(t, r, "user-1") // headers naming a user...
 	r.Header.Set(workload.HdrWorkload, "Bearer "+kc.token(t, "dx-catalogue-go", "dx-acl-go"))
 
 	rec := httptest.NewRecorder()
 	mw(obs.handler()).ServeHTTP(rec, r)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"...presented by a workload that may not speak for users is refused, signature or not")
+		"...presented by a workload that may not speak for users is refused")
 	assert.False(t, obs.served)
 	assert.Empty(t, obs.subject.ID)
 }
@@ -202,9 +211,9 @@ func TestOptionalModeStillAuthenticatesTheWorkload(t *testing.T) {
 	obs := &observed{}
 
 	mw := middleware.Resolve(middleware.AuthConfig{
-		Mode:       middleware.Optional,
-		HMACSecret: testHMACSecret,
-		Workload:   kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
+		Mode:                middleware.Optional,
+		TrustSubjectHeaders: true,
+		Workload:            kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
 	})
 
 	// A service-to-service call carrying no user identity at all.
@@ -224,12 +233,12 @@ func TestInvalidWorkloadCredentialIsNeverDowngraded(t *testing.T) {
 	obs := &observed{}
 
 	mw := middleware.Resolve(middleware.AuthConfig{
-		HMACSecret: testHMACSecret,
-		Workload:   kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
+		TrustSubjectHeaders: true,
+		Workload:            kc.verifier(t, "dx-acl-go", "dx-gateway-go"),
 	})
 
 	r := httptest.NewRequest(http.MethodGet, "http://svc/v1/things", nil)
-	signedSubject(t, r, "user-1")
+	assertSubject(t, r, "user-1")
 	// A token minted for a DIFFERENT service, replayed here.
 	r.Header.Set(workload.HdrWorkload, "Bearer "+kc.token(t, "dx-gateway-go", "dx-audit-go"))
 
@@ -237,6 +246,6 @@ func TestInvalidWorkloadCredentialIsNeverDowngraded(t *testing.T) {
 	mw(obs.handler()).ServeHTTP(rec, r)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
-		"a bad workload token must not fall back to the legacy path — that would be a downgrade attack")
+		"a bad workload token must not fall back to any other path — that would be a downgrade attack")
 	assert.False(t, obs.served)
 }

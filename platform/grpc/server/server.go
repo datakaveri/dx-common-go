@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/datakaveri/dx-common-go/platform/security/workload"
-	dxheaders "github.com/datakaveri/dx-common-go/transport/headers"
 )
 
 // Config is a gRPC server's settings.
@@ -71,11 +70,6 @@ type Options struct {
 	// check, which is the shipped default until P0-2 stage 3.
 	Workload *workload.Verifier
 
-	// InternalAuth verifies the X-Subject-* metadata identifying WHICH USER the
-	// caller speaks for. An empty Secret disables subject verification, which
-	// is the local-dev case only.
-	InternalAuth dxheaders.Config
-
 	// Interceptors are appended AFTER the platform's own, so a service may add
 	// behaviour but cannot displace identity verification.
 	Interceptors []grpc.UnaryServerInterceptor
@@ -112,13 +106,15 @@ func New(cfg Config, opts Options, register ...Registrar) (*Server, error) {
 		shutdown = defaultShutdownTimeout
 	}
 
-	// Order is fixed, not configurable. Recovery outermost so a panic anywhere
-	// later becomes an error instead of killing the process. Then workload
-	// (which SERVICE is calling), then subject (which USER it speaks for) —
-	// the same order as the HTTP chain, where the workload gate wraps the
-	// subject resolver precisely so it runs first: resolving the subject before
-	// deciding whether to trust the caller would mean trusting the headers in
-	// order to decide whether to trust them.
+	// Order is fixed, not configurable, and since P0-17 stage 2 it is the whole
+	// control rather than a defence in depth. Recovery outermost so a panic
+	// anywhere later becomes an error instead of killing the process. Then
+	// workload (which SERVICE is calling), then subject (which USER it speaks
+	// for) — the same order as the HTTP chain. The subject metadata is UNSIGNED,
+	// so nothing authenticates it except the fact that the workload interceptor
+	// already verified the caller and checked it against the asserter list.
+	// Resolving the subject first would mean trusting the metadata in order to
+	// decide whether to trust it.
 	chain := []grpc.UnaryServerInterceptor{
 		recoveryInterceptor(log),
 		loggingInterceptor(log),
@@ -126,7 +122,7 @@ func New(cfg Config, opts Options, register ...Registrar) (*Server, error) {
 	if opts.Workload != nil {
 		chain = append(chain, workloadInterceptor(opts.Workload, log))
 	}
-	chain = append(chain, subjectInterceptor(opts.InternalAuth))
+	chain = append(chain, subjectInterceptor())
 	chain = append(chain, opts.Interceptors...)
 
 	srv := grpc.NewServer(

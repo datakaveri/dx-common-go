@@ -142,13 +142,12 @@ func Load[T any](opts Options) (*T, error) {
 // ── the shared shape every service embeds ──────────────────────────────────
 
 // Base is the configuration every service has. Embedding it removes the
-// per-service redeclaration of ServerConfig (21 copies) and InternalAuthConfig
+// per-service redeclaration of ServerConfig (21 copies) and the auth config
 // (20 copies), and gives bootstrap a fixed place to read what it needs.
 type Base struct {
-	LogLevel     string       `mapstructure:"log_level"`
-	Server       Server       `mapstructure:"server"`
-	SchemaMode   string       `mapstructure:"schema_mode"`
-	InternalAuth InternalAuth `mapstructure:"internal_auth"`
+	LogLevel   string `mapstructure:"log_level"`
+	Server     Server `mapstructure:"server"`
+	SchemaMode string `mapstructure:"schema_mode"`
 	// GRPC is the internal service-to-service surface. Port 0 means the service
 	// serves no gRPC, which is the default and most services' answer.
 	//
@@ -201,20 +200,6 @@ type Server struct {
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 }
 
-// InternalAuth is the shared secret the gateway signs identity headers with.
-type InternalAuth struct {
-	SharedSecret string `mapstructure:"shared_secret"`
-	// HeaderMaxAge bounds how stale a signed identity header may be — the
-	// replay window enforced by transport/headers.Verify. Zero uses that
-	// package's 60s default.
-	//
-	// It lives here rather than in the gateway's own config because it is a
-	// VERIFIER concern: every upstream that checks a signed header enforces
-	// this window, and today none of them can configure it. The signer and the
-	// verifiers must agree, so it has to be expressible on both sides.
-	HeaderMaxAge time.Duration `mapstructure:"header_max_age"`
-}
-
 // GRPC configures the internal gRPC surface.
 type GRPC struct {
 	Port            int           `mapstructure:"port"`
@@ -259,8 +244,6 @@ func PlatformDefaults() map[string]any {
 		// how a secret supplied purely through the environment silently binds
 		// to nothing, which is the most confusing possible failure in a
 		// container.
-		"internal_auth.shared_secret":  "",
-		"internal_auth.header_max_age": 0,
 		// Workload identity (ADR-06 / ROADMAP P0-2). Registered here as bare
 		// KEYS, with no import of platform/security/workload: config is L0 and
 		// must stay a leaf, so it owns key registration while that package owns

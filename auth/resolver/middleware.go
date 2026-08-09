@@ -7,27 +7,44 @@ import (
 	"github.com/datakaveri/dx-common-go/auth"
 	dxjwt "github.com/datakaveri/dx-common-go/auth/jwt"
 	dxerrors "github.com/datakaveri/dx-common-go/errors"
+	"github.com/datakaveri/dx-common-go/platform/security/workload"
 	dxheaders "github.com/datakaveri/dx-common-go/transport/headers"
 )
 
 // Middleware returns a chi-compatible handler that establishes auth.DxUser
-// in the request context from either HMAC-signed subject headers (preferred)
+// in the request context from either the internal subject headers (preferred)
 // or a Bearer JWT (fallback). See the package doc for the precedence rules.
+//
+// # What makes the subject headers trustworthy
+//
+// They are NOT signed (ROADMAP P0-17 stage 2 — see transport/headers for why
+// the HMAC was removed rather than replaced). Their authority comes from the
+// CALLER: platform/security/workload verifies the calling workload's
+// audience-bound credential and, if that workload is not on the receiving
+// service's subject_asserters list, rejects the request before this middleware
+// ever runs.
+//
+// So this reads the headers only when a verified workload principal is on the
+// context. That is a precondition, not a config flag, and deliberately so: a
+// flag can be set on a service that has no verifier, and the result would be
+// that any client could name any user by setting one header. There is no way to
+// spell that mistake here — no verified caller, no subject headers.
 //
 // Misconfiguration is treated as a programming error and panics at handler
 // construction time — both verification paths cannot be disabled simultaneously.
 //
 // Switches:
-//   - HMAC path is enabled when cfg.Headers.Secret is non-empty.
+//   - Subject-header path is enabled by cfg.TrustSubjectHeaders AND a verified
+//     workload on the request.
 //   - JWT path is enabled when cfg.AllowDirect is true. Real vs dev-mode JWT
 //     behaviour is delegated to dx-common-go/auth/jwt via cfg.JWT.Enabled
 //     (real validation when true, synthetic-user injection when false).
 func Middleware(cfg Config) func(http.Handler) http.Handler {
-	allowHMAC := len(cfg.Headers.Secret) > 0
+	allowSubjectHeaders := cfg.TrustSubjectHeaders
 	allowDirect := cfg.AllowDirect
 
-	if !allowHMAC && !allowDirect {
-		panic("resolver.Middleware: at least one of Headers.Secret or AllowDirect must be set")
+	if !allowSubjectHeaders && !allowDirect {
+		panic("resolver.Middleware: at least one of TrustSubjectHeaders or AllowDirect must be set")
 	}
 
 	// Pre-build the JWT validator so config errors fail at startup, not
@@ -39,14 +56,21 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// (1) HMAC path — try first whenever a signature is present.
-			if allowHMAC && r.Header.Get(dxheaders.HdrSubjectSig) != "" {
-				user, err := dxheaders.Verify(r.Header, cfg.Headers)
+			// (1) Subject-header path — only for a VERIFIED workload.
+			if allowSubjectHeaders && dxheaders.Asserts(r.Header) {
+				if _, verified := workload.From(r.Context()); !verified {
+					// Headers naming a user, from a caller we have not
+					// authenticated. Refuse rather than fall through to JWT:
+					// falling through would serve the request as whoever the
+					// Bearer names while silently ignoring a spoofing attempt,
+					// and refusing makes the attempt visible.
+					dxerrors.WriteError(w, dxerrors.NewUnauthorized(
+						"subject headers require a verified workload caller"))
+					return
+				}
+				user, err := dxheaders.Parse(r.Header)
 				if err != nil {
-					// A signature header was sent but failed verification.
-					// Do NOT fall through to JWT — that would let a caller
-					// smuggle a wrong identity past the signature check.
-					dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid subject signature"))
+					dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid subject headers"))
 					return
 				}
 				ctx := auth.WithUser(r.Context(), user)
@@ -58,8 +82,9 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			// (2) JWT fallback path.
 			if !allowDirect || jwtMW == nil {
 				// Either the operator disabled the direct path, or this service
-				// runs in HMAC-only mode and the request had no signature.
-				dxerrors.WriteError(w, dxerrors.NewUnauthorized("gateway-signed subject headers required"))
+				// only accepts internal calls and the request asserted no
+				// subject.
+				dxerrors.WriteError(w, dxerrors.NewUnauthorized("internal subject headers required"))
 				return
 			}
 
@@ -79,36 +104,6 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				next.ServeHTTP(ww, rr.WithContext(ctx))
 			})
 			jwtMW(tagged).ServeHTTP(w, r)
-		})
-	}
-}
-
-// RequireGatewayOrigin returns a middleware that 403s any request whose
-// resolved origin is not OriginGateway. Use on per-route admin / sensitive
-// paths that must not be reachable by a direct caller, even one with a
-// valid JWT.
-//
-// MUST be installed AFTER Middleware in the chain — it reads the origin
-// the resolver placed in the context.
-//
-// SUPERSEDED by platform/security/workload.RequireCaller, and weaker than its
-// name suggests. OriginGateway means only that the request carried a valid HMAC
-// signature, and every service holds the same secret — so this proves
-// "somebody with the shared secret called", not "the gateway called" (review
-// finding C-02, ROADMAP P0-2, ADR-06 §2.6). Switch to RequireCaller once the
-// service verifies workload identity; it checks a cryptographically bound
-// client id instead. Not marked Deprecated yet only because the one remaining
-// consumer (dx-agent-registry-go) cannot switch until its verifier is enabled,
-// and a lint failure there would block the rollout that removes it.
-func RequireGatewayOrigin() func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin, ok := OriginFromCtx(r.Context())
-			if !ok || origin != OriginGateway {
-				dxerrors.WriteError(w, dxerrors.NewForbidden("this endpoint is only accessible via the gateway"))
-				return
-			}
-			next.ServeHTTP(w, r)
 		})
 	}
 }

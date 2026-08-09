@@ -54,7 +54,6 @@ func TestKeys(t *testing.T) {
 	for _, want := range []string{
 		"log_level",   // from the squashed config.Base
 		"server.port", // nested inside the squashed Base
-		"internal_auth.shared_secret",
 		"postgres.host",
 		"postgres.port",
 		"redis.host", // through a POINTER to a struct

@@ -12,9 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/datakaveri/dx-common-go/auth"
 	"github.com/datakaveri/dx-common-go/resilience"
-	"github.com/datakaveri/dx-common-go/transport/headers"
 )
 
 // Client is a typed REST client for dx-authz-go.
@@ -30,9 +28,6 @@ type Client struct {
 func New(cfg Config) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("fga.New: BaseURL is required")
-	}
-	if cfg.SharedSecret != "" && cfg.ServiceName == "" {
-		return nil, fmt.Errorf("fga.New: ServiceName is required when SharedSecret is set")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if cfg.Timeout == 0 {
@@ -160,32 +155,22 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if c.cfg.ServiceToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.ServiceToken)
 	}
-	if c.cfg.SharedSecret != "" {
-		// LEGACY pseudo-user identity. Retained during the ADR-06 rollout so an
-		// unmigrated dx-authz-go keeps accepting these calls; it goes away with
-		// the shared secret at stage 3.
-		signed, err := headers.Sign(auth.DxUser{
-			ID:    "svc:" + c.cfg.ServiceName,
-			Roles: []string{"service"},
-		}, headers.Config{Secret: []byte(c.cfg.SharedSecret)})
-		if err != nil {
-			return fmt.Errorf("fga client: sign service identity: %w", err)
-		}
-		headers.Apply(req, signed)
-	}
 	if c.cfg.Workload != nil {
-		// The real identity, alongside the pseudo-user rather than instead of
-		// it: verifier before signer means dx-authz-go must accept both before
-		// anything stops sending the old one.
+		// The client's identity, and now the only one it has.
 		//
-		// A failure here is NOT fatal while the pseudo-user is still being sent
-		// — dropping an authorization call because Keycloak blinked would turn
-		// a credential problem into a denial of service on the PDP path. Once
-		// SharedSecret is gone this must become an error; that is stage 3.
+		// It used to sign a FABRICATED user — X-Subject-* naming
+		// "svc:<ServiceName>" with role "service" — as its service identity.
+		// That was never a user, and it worked only because every holder of the
+		// shared secret could mint any subject (review finding C-02). It is
+		// deleted with the secret (ROADMAP P0-17 stage 2).
+		//
+		// A failure is now FATAL, which is the change that matters here. While
+		// the pseudo-user was still being sent, failing open kept a Keycloak
+		// blip from becoming a denial of service on the PDP path; with nothing
+		// left to fall back to, proceeding would send an unauthenticated call
+		// that the receiver must reject anyway.
 		if err := c.cfg.Workload.Authorize(ctx, req, AuthzWorkload); err != nil {
-			if c.cfg.SharedSecret == "" {
-				return fmt.Errorf("fga client: workload credential: %w", err)
-			}
+			return fmt.Errorf("fga client: workload credential: %w", err)
 		}
 	}
 

@@ -42,10 +42,15 @@ type AuthConfig struct {
 	// Mode controls whether an ABSENT credential is tolerated. It never
 	// tolerates an invalid one.
 	Mode Mode
-	// HMACSecret verifies the gateway-signed X-Subject-* identity headers. This
+	// TrustSubjectHeaders enables the internal X-Subject-* identity path. This
 	// is the primary path: the gateway is the single PEP, and everything behind
-	// it trusts headers it signed.
-	HMACSecret string
+	// it reads the subject it projected.
+	//
+	// The headers are UNSIGNED (ROADMAP P0-17 stage 2). Setting this alone opens
+	// nothing: the resolver additionally requires a verified workload principal
+	// on the request, so a service with no Workload verifier rejects every
+	// subject header rather than trusting a client-supplied one.
+	TrustSubjectHeaders bool
 	// JWT enables a direct Bearer path alongside HMAC, for an operator calling
 	// a service without going through the gateway.
 	JWT dxjwt.Config
@@ -78,24 +83,26 @@ type AuthConfig struct {
 // legacy auth package in Wave 4.
 //
 // AllowDirect mirrors the established rule: the direct path opens only when JWT
-// validation is actually enabled, or when no secret is configured at all (dev,
-// where the resolver injects a synthetic user). A production config that HAS a
-// secret therefore never silently accepts unauthenticated direct calls.
+// validation is actually enabled, or when the internal path is not trusted at
+// all (dev, where the resolver injects a synthetic user). A production config
+// that accepts internal calls therefore never silently accepts unauthenticated
+// direct ones.
 func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 	resolver := authresolver.Middleware(authresolver.Config{
-		Headers:     dxheaders.Config{Secret: []byte(cfg.HMACSecret)},
-		JWT:         cfg.JWT,
-		AllowDirect: cfg.JWT.Enabled || cfg.HMACSecret == "",
+		TrustSubjectHeaders: cfg.TrustSubjectHeaders,
+		JWT:                 cfg.JWT,
+		AllowDirect:         cfg.JWT.Enabled || !cfg.TrustSubjectHeaders,
 	})
 
 	// The workload gate wraps EVERYTHING below, so it runs before the subject is
-	// resolved. That order is the point, not an implementation detail: the gate
-	// decides whether this caller may speak for a user at all, and resolving the
-	// subject first would mean trusting the X-Subject-* headers in order to
-	// decide whether to trust them.
+	// resolved. Since P0-17 stage 2 that order is not merely the point, it is
+	// the ONLY thing authenticating the subject: the headers carry no signature,
+	// so the gate's verified principal is what the resolver checks for before
+	// reading them. Resolving the subject first would mean trusting the
+	// X-Subject-* headers in order to decide whether to trust them.
 	//
-	// With cfg.Workload nil this is the identity function and the chain below is
-	// byte-for-byte what it was before.
+	// With cfg.Workload nil this is the identity function — and the resolver
+	// then rejects every subject header, because there is no verified caller.
 	workloadGate := workload.Middleware(cfg.Workload)
 
 	return func(next http.Handler) http.Handler {
@@ -121,7 +128,7 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 			// A credential that IS present goes through the full resolver, so
 			// an invalid one still fails — absence is tolerated, invalidity is
 			// not.
-			if hasCredential(r, cfg.HMACSecret != "") {
+			if hasCredential(r, cfg.TrustSubjectHeaders) {
 				inner.ServeHTTP(w, r)
 				return
 			}
@@ -136,8 +143,8 @@ func Resolve(cfg AuthConfig) func(http.Handler) http.Handler {
 // It must consider EVERY form the resolver accepts. Missing one — Basic for
 // app credentials, say — silently anonymises a caller who did authenticate,
 // which is the failure mode optional auth is most likely to produce.
-func hasCredential(r *http.Request, hmacEnabled bool) bool {
-	if hmacEnabled && r.Header.Get(dxheaders.HdrSubjectSig) != "" {
+func hasCredential(r *http.Request, subjectHeadersTrusted bool) bool {
+	if subjectHeadersTrusted && dxheaders.Asserts(r.Header) {
 		return true
 	}
 	return r.Header.Get("Authorization") != ""

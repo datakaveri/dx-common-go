@@ -13,7 +13,9 @@
 //
 // Downstream handlers and middlewares can call auth.UserFromCtx as usual; the
 // caller's path can be inspected with resolver.OriginFromCtx for per-route
-// policy (e.g. RequireGatewayOrigin).
+// policy. NOTHING does today: the one guard that did (RequireGatewayOrigin) is
+// deleted, because "valid shared-secret signature" was never "the gateway"
+// (ROADMAP P0-17). This is provenance for logs and tests.
 package resolver
 
 import "context"

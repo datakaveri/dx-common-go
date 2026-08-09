@@ -16,14 +16,13 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/datakaveri/dx-common-go/auth"
+	"github.com/datakaveri/dx-common-go/platform/security/workload"
 	dxheaders "github.com/datakaveri/dx-common-go/transport/headers"
 )
 
 // The hazard this package's tests exist for: an identity interceptor that
 // verifies nothing is fleet-green and silently weaker than the HTTP path it
 // replaces. Every check below is sabotage-verified — see the comment on each.
-
-const testSecret = "9f2c7a1b4e8d6c0a5f3b7e1d9c2a4f68"
 
 // serveTest starts the real server on a bufconn and returns a dialled client
 // connection. It goes through ServeListener, the same path Serve takes, so what
@@ -108,12 +107,13 @@ func TestNew_RejectsZeroPort(t *testing.T) {
 
 // ── subject identity ────────────────────────────────────────────────────────
 
-// signedMD produces the metadata a caller would send for a user, using the SAME
-// signer the HTTP path uses. That is the property under test: one canonical
-// string and one secret across both transports.
-func signedMD(t *testing.T, user auth.DxUser, secret string) metadata.MD {
+// subjectMD produces the metadata a caller would send for a user, using the
+// SAME projection the HTTP path uses. That is the property under test: one
+// header set across both transports, so a service migrating a call from HTTP to
+// gRPC does not acquire a second identity format.
+func subjectMD(t *testing.T, user auth.DxUser) metadata.MD {
 	t.Helper()
-	h, err := dxheaders.Sign(user, dxheaders.Config{Secret: []byte(secret)})
+	h, err := dxheaders.Project(user)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,70 +132,69 @@ func signedMD(t *testing.T, user auth.DxUser, secret string) metadata.MD {
 // signer or a second canonical string.
 //
 // SABOTAGE: drop MDToHeader's Add loop → this fails (no subject resolved).
-func TestSubject_SignedByTheHTTPSignerIsAccepted(t *testing.T) {
+// This exercises subjectInterceptor DIRECTLY rather than through serveTest,
+// and the reason is itself the property TestInterceptorOrder pins: Options.
+// Interceptors are appended AFTER the platform's own, so a fixture cannot
+// inject a verified principal ahead of the subject interceptor through the
+// public options. In production the workload interceptor does it, because the
+// chain in server.go puts it first. A test that could stage a principal from
+// Options would be evidence the ordering guarantee was broken.
+func TestSubject_ProjectedByTheHTTPPathIsAccepted(t *testing.T) {
 	var got auth.DxUser
 	var found bool
-	capture := func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+	next := func(ctx context.Context, _ any) (any, error) {
 		got, found = auth.UserFromCtx(ctx)
-		return h(ctx, req)
+		return nil, nil
 	}
-	conn := serveTest(t, Options{
-		InternalAuth: dxheaders.Config{Secret: []byte(testSecret)},
-		Interceptors: []grpc.UnaryServerInterceptor{capture},
-	})
 
-	ctx := metadata.NewOutgoingContext(context.Background(),
-		signedMD(t, auth.DxUser{ID: "user-1", Email: "u@example.org"}, testSecret))
-	if err := healthCheck(ctx, conn); err != nil {
-		t.Fatalf("a validly signed subject must be accepted: %v", err)
+	// A verified workload is a PRECONDITION of any subject being honoured
+	// (ROADMAP P0-17 stage 2): the metadata is unsigned, so the caller's
+	// verified identity is the only thing authorising it to name a user.
+	ctx := workload.With(context.Background(), workload.Principal{ID: "dx-gateway-go"})
+	ctx = metadata.NewIncomingContext(ctx,
+		subjectMD(t, auth.DxUser{ID: "user-1", Email: "u@example.org"}))
+
+	if _, err := subjectInterceptor()(ctx, nil, &grpc.UnaryServerInfo{}, next); err != nil {
+		t.Fatalf("a subject from a verified workload must be accepted: %v", err)
 	}
 	if !found || got.ID != "user-1" {
 		t.Errorf("subject on context = %+v (found=%v), want user-1", got, found)
 	}
 }
 
-// TestSubject_ForgedSignatureIsRejected: the signature must be a control, not a
-// decoration. A caller that tampers with the subject must be refused, not
-// downgraded to anonymous — being treated as anonymous would let an attacker
-// choose which identity checks apply to them.
+// TestSubject_WithoutAVerifiedWorkloadIsRejected replaces the two tests that
+// asserted signature behaviour (forged signature, wrong secret). Those were
+// real controls when the metadata was signed; with the HMAC deleted (ROADMAP
+// P0-17 stage 2) the equivalent — and stronger — control is that a subject is
+// only honoured behind a verified caller.
 //
-// SABOTAGE: return handler(ctx, req) in subjectInterceptor's default branch →
-// this fails.
-func TestSubject_ForgedSignatureIsRejected(t *testing.T) {
-	conn := serveTest(t, Options{InternalAuth: dxheaders.Config{Secret: []byte(testSecret)}})
+// The property preserved across the change is the important one: an
+// unauthorised subject is REFUSED, not silently downgraded to anonymous. Being
+// treated as anonymous would let an attacker choose which identity checks apply
+// to them.
+//
+// SABOTAGE: drop the workload.From check in subjectInterceptor → this fails.
+func TestSubject_WithoutAVerifiedWorkloadIsRejected(t *testing.T) {
+	conn := serveTest(t, Options{}) // no workload interceptor, no principal
 
-	md := signedMD(t, auth.DxUser{ID: "user-1"}, testSecret)
-	md.Set(dxheaders.HdrSubjectID, "somebody-else") // signature no longer matches
-
+	md := subjectMD(t, auth.DxUser{ID: "somebody-else"})
 	err := healthCheck(metadata.NewOutgoingContext(context.Background(), md), conn)
 	if status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("code = %v, want Unauthenticated for a forged subject", status.Code(err))
+		t.Fatalf("code = %v, want Unauthenticated for a subject from an unverified caller", status.Code(err))
 	}
 }
 
-// TestSubject_SignedWithTheWrongSecretIsRejected proves the secret is actually
-// checked rather than the presence of a signature.
-func TestSubject_SignedWithTheWrongSecretIsRejected(t *testing.T) {
-	conn := serveTest(t, Options{InternalAuth: dxheaders.Config{Secret: []byte(testSecret)}})
-
-	md := signedMD(t, auth.DxUser{ID: "user-1"}, "a-different-secret-entirely-0000")
-	err := healthCheck(metadata.NewOutgoingContext(context.Background(), md), conn)
-	if status.Code(err) != codes.Unauthenticated {
-		t.Fatalf("code = %v, want Unauthenticated when signed with the wrong secret", status.Code(err))
-	}
-}
-
-// TestSubject_UnsignedCallIsAnonymousNotRejected: a service calling on its own
-// behalf asserts no subject, which is legitimate. The handler decides whether
-// it needs a user; the interceptor's job is to reject a LIE, not an absence.
-func TestSubject_UnsignedCallIsAnonymousNotRejected(t *testing.T) {
+// TestSubject_CallAssertingNoSubjectIsAnonymousNotRejected: a service calling
+// on its own behalf asserts no subject, which is legitimate. The handler
+// decides whether it needs a user; the interceptor's job is to reject a LIE,
+// not an absence.
+func TestSubject_CallAssertingNoSubjectIsAnonymousNotRejected(t *testing.T) {
 	var found bool
 	capture := func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
 		_, found = auth.UserFromCtx(ctx)
 		return h(ctx, req)
 	}
 	conn := serveTest(t, Options{
-		InternalAuth: dxheaders.Config{Secret: []byte(testSecret)},
 		Interceptors: []grpc.UnaryServerInterceptor{capture},
 	})
 
@@ -207,15 +206,22 @@ func TestSubject_UnsignedCallIsAnonymousNotRejected(t *testing.T) {
 	}
 }
 
-// TestSubject_NoSecretDisablesVerification is the local-dev path. It is here so
-// the disabled case is a DECISION with a test, not an accident of an empty
-// config value.
-func TestSubject_NoSecretDisablesVerification(t *testing.T) {
+// TestSubject_ThereIsNoDisabledMode replaces TestSubject_NoSecretDisablesVerification,
+// which asserted that an empty secret turned subject verification OFF — the
+// local-dev escape hatch.
+//
+// That mode is gone with the secret (ROADMAP P0-17 stage 2), and its removal is
+// the point rather than a side effect: "no secret configured" was
+// indistinguishable from "misconfigured in production", and it meant any caller
+// could name any user. There is now exactly one behaviour, and this pins it.
+func TestSubject_ThereIsNoDisabledMode(t *testing.T) {
 	conn := serveTest(t, Options{})
 
 	md := metadata.Pairs(dxheaders.HdrSubjectID, "anyone-at-all")
-	if err := healthCheck(metadata.NewOutgoingContext(context.Background(), md), conn); err != nil {
-		t.Fatalf("with no secret configured the check is disabled: %v", err)
+	err := healthCheck(metadata.NewOutgoingContext(context.Background(), md), conn)
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("code = %v, want Unauthenticated: there is no configuration in which an "+
+			"unverified caller may name a user", status.Code(err))
 	}
 }
 
@@ -250,12 +256,12 @@ func TestInterceptorOrder_ServiceCannotDisplaceIdentity(t *testing.T) {
 		return h(ctx, req)
 	}
 	conn := serveTest(t, Options{
-		InternalAuth: dxheaders.Config{Secret: []byte(testSecret)},
 		Interceptors: []grpc.UnaryServerInterceptor{svc},
 	})
 
-	md := signedMD(t, auth.DxUser{ID: "u"}, testSecret)
-	md.Set(dxheaders.HdrSubjectID, "forged")
+	// A subject asserted by a caller nobody verified: the subject interceptor
+	// must refuse it, and the service interceptor must never run.
+	md := subjectMD(t, auth.DxUser{ID: "forged"})
 	_ = healthCheck(metadata.NewOutgoingContext(context.Background(), md), conn)
 
 	if ran {

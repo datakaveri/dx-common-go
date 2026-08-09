@@ -20,11 +20,6 @@ type Config struct {
 	// service-to-service authentication (when the authz service requires it).
 	ServiceToken string `mapstructure:"service_token"`
 
-	// SharedSecret enables HMAC service identity: each request carries
-	// X-Subject-* headers for "svc:<ServiceName>" signed with this secret —
-	// the same scheme the gateway uses for user identity, so dx-authz-go can
-	// protect /v1/* with the standard resolver middleware. Empty disables it.
-	SharedSecret string `mapstructure:"shared_secret"`
 	// ServiceName identifies the caller in the signed identity
 	// (e.g. "gateway", "files-connect"). Required when SharedSecret is set.
 	ServiceName string `mapstructure:"service_name"`

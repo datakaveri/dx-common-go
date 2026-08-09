@@ -16,7 +16,7 @@ import (
 // is a workload wearing a user's clothes, and any holder of the shared secret
 // can mint it for any service name. These tests cover the replacement: a real,
 // audience-bound credential addressed to dx-authz-go, sent alongside it.
-func TestWorkloadCredentialAccompaniesThePseudoUser(t *testing.T) {
+func TestWorkloadCredentialIsTheOnlyIdentity(t *testing.T) {
 	kc := keycloak.New(t)
 	kc.RegisterWorkload("dx-gateway-go", "gateway-secret", fga.AuthzWorkload)
 
@@ -38,10 +38,9 @@ func TestWorkloadCredentialAccompaniesThePseudoUser(t *testing.T) {
 	defer srv.Close()
 
 	c, err := fga.New(fga.Config{
-		BaseURL:      srv.URL,
-		SharedSecret: "dev-secret",
-		ServiceName:  "gateway",
-		Workload:     src,
+		BaseURL:     srv.URL,
+		ServiceName: "gateway",
+		Workload:    src,
 	})
 	if err != nil {
 		t.Fatalf("fga.New: %v", err)
@@ -50,8 +49,13 @@ func TestWorkloadCredentialAccompaniesThePseudoUser(t *testing.T) {
 		t.Fatalf("Check: %v", err)
 	}
 
-	if gotSubject != "svc:gateway" {
-		t.Fatalf("X-Subject-Id = %q, the legacy identity must still travel during the rollout", gotSubject)
+	// The pseudo-user is GONE (ROADMAP P0-17 stage 2). This assertion used to
+	// require X-Subject-Id == "svc:gateway" — a fabricated user that was never
+	// a user, and that only worked because any holder of the shared secret
+	// could mint any subject. Its absence is now the property.
+	if gotSubject != "" {
+		t.Fatalf("X-Subject-Id = %q, want none: the client has no user to speak for "+
+			"and must not fabricate one", gotSubject)
 	}
 	if gotWorkload == "" {
 		t.Fatal("no workload credential attached")
@@ -66,10 +70,16 @@ func TestWorkloadCredentialAccompaniesThePseudoUser(t *testing.T) {
 	}
 }
 
-// While the pseudo-user is still being sent, a Keycloak outage must not take
-// the PDP path down with it: an authorization call that fails to mint is worse
-// than one that falls back. After stage 3 removes SharedSecret this inverts.
-func TestMintingFailureDoesNotBreakTheAuthorizationPathYet(t *testing.T) {
+// This test previously asserted the OPPOSITE, and said so: "after stage 3
+// removes SharedSecret this inverts". It has now inverted (ROADMAP P0-17
+// stage 2).
+//
+// While the fabricated pseudo-user was still being sent, a Keycloak outage
+// must not take the PDP path down with it — falling back was better than
+// failing. With the pseudo-user deleted there is nothing to fall back TO, so
+// proceeding would send an unidentified authorization call that the receiver
+// must reject anyway. Failing at the caller is both honest and cheaper.
+func TestMintingFailureNowFailsTheAuthorizationCall(t *testing.T) {
 	kc := keycloak.New(t)
 	// Registered without the dx-authz-go audience, so minting is refused.
 	kc.RegisterWorkload("dx-catalogue-go", "catalogue-secret")
@@ -88,24 +98,13 @@ func TestMintingFailureDoesNotBreakTheAuthorizationPathYet(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	withLegacy, err := fga.New(fga.Config{
-		BaseURL: srv.URL, SharedSecret: "dev-secret", ServiceName: "catalogue", Workload: src,
-	})
+	c, err := fga.New(fga.Config{BaseURL: srv.URL, ServiceName: "catalogue", Workload: src})
 	if err != nil {
 		t.Fatalf("fga.New: %v", err)
 	}
-	if _, err := withLegacy.Check(context.Background(), checkReq()); err != nil {
-		t.Fatalf("Check must still succeed while the pseudo-user carries it: %v", err)
-	}
-
-	// With the shared secret gone there is no fallback identity, so the same
-	// failure must surface rather than send an unidentified request.
-	noLegacy, err := fga.New(fga.Config{BaseURL: srv.URL, Workload: src})
-	if err != nil {
-		t.Fatalf("fga.New: %v", err)
-	}
-	if _, err := noLegacy.Check(context.Background(), checkReq()); err == nil {
-		t.Fatal("with no legacy identity, an unmintable credential must fail the call")
+	if _, err := c.Check(context.Background(), checkReq()); err == nil {
+		t.Fatal("an unmintable credential must fail the call: there is no fallback identity " +
+			"left, so the alternative is sending an unidentified authorization request")
 	}
 }
 
