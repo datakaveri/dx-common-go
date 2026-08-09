@@ -57,6 +57,19 @@ var ErrHeld = errors.New("lease: held by another owner")
 // two-replicas-at-once case this package exists to prevent.
 var ErrLost = errors.New("lease: no longer held by this owner")
 
+// ErrInterrupted means someone has asked the work behind this lease to stop.
+//
+// It rides on Renew rather than having its own poll because the holder ALREADY
+// round-trips to the database on every renewal, and "do I still own this?" and
+// "should I stop?" are the same question asked at the same moment. A separate
+// poll would double the query rate for a signal that fires approximately never.
+//
+// The consequence, stated plainly because it is a real limit rather than an
+// implementation detail: an interrupt lands within one RENEWAL interval, not
+// instantly. A caller needing sub-second cancellation of remote work needs a
+// push channel, which is a different design and should be chosen deliberately.
+var ErrInterrupted = errors.New("lease: interrupt requested")
+
 // DefaultTTL is the lease duration when none is given.
 //
 // It must exceed the longest a holder can go without renewing, or a healthy
@@ -79,7 +92,8 @@ type Store struct {
 //	CREATE TABLE <table> (
 //	    name       text PRIMARY KEY,
 //	    owner      text NOT NULL,
-//	    expires_at timestamptz NOT NULL
+//	    expires_at timestamptz NOT NULL,
+//	    interrupt_requested boolean NOT NULL DEFAULT false
 //	);
 //
 // The primary key on name is the concurrency control — exactly one INSERT wins,
@@ -117,7 +131,12 @@ func (s *Store) Acquire(ctx context.Context, name string, ttl time.Duration) (*L
 		INSERT INTO %s (name, owner, expires_at)
 		VALUES ($1, $2, now() + make_interval(secs => $3))
 		ON CONFLICT (name) DO UPDATE
-		   SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at
+		   SET owner = EXCLUDED.owner, expires_at = EXCLUDED.expires_at,
+		       -- Clear the flag on takeover. An interrupt is aimed at the WORK
+		       -- that was running, not at the name: leaving it set would abort
+		       -- the next holder for a request that was already satisfied by
+		       -- the previous one stopping.
+		       interrupt_requested = false
 		 WHERE %s.expires_at < now()`, s.table, s.table),
 		name, owner, ttl.Seconds())
 	if err != nil {
@@ -137,15 +156,49 @@ func (l *Lease) Renew(ctx context.Context, ttl time.Duration) error {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	n, err := l.store.db.Exec(ctx, fmt.Sprintf(`
-		UPDATE %s SET expires_at = now() + make_interval(secs => $1)
-		 WHERE name = $2 AND owner = $3`, l.store.table),
-		ttl.Seconds(), l.name, l.owner)
+	// One statement, wrapped in a CTE so it ALWAYS returns exactly one row.
+	//
+	// The obvious form — UPDATE ... RETURNING interrupt_requested — returns no
+	// rows when this owner has been taken over, and "no rows" then has to be
+	// told apart from a real query failure by matching on driver error text.
+	// Aggregating over the CTE turns that into a count: zero means lost, and
+	// every other error is genuinely an error.
+	var updated int
+	var interrupted bool
+	err := l.store.db.QueryRow(ctx, fmt.Sprintf(`
+		WITH renewed AS (
+			UPDATE %s SET expires_at = now() + make_interval(secs => $1)
+			 WHERE name = $2 AND owner = $3
+		 RETURNING interrupt_requested
+		)
+		SELECT count(*), coalesce(bool_or(interrupt_requested), false) FROM renewed`,
+		l.store.table), ttl.Seconds(), l.name, l.owner).Scan(&updated, &interrupted)
 	if err != nil {
 		return fmt.Errorf("lease: renew %q: %w", l.name, err)
 	}
-	if n == 0 {
+	if updated == 0 {
 		return ErrLost
+	}
+	if interrupted {
+		return ErrInterrupted
+	}
+	return nil
+}
+
+// Interrupt asks whoever holds name to stop, WHEREVER they are running.
+//
+// It sets a flag rather than cancelling anything directly, because the holder
+// is in another process and there is nothing here to cancel. The holder sees it
+// on its next renewal and stops itself — so this returns as soon as the request
+// is durable, not when the work has actually ended.
+//
+// Setting it on a lease nobody holds is deliberately NOT an error: the work may
+// have finished a moment earlier, and reporting that as a failure would make
+// every interrupt racy at the caller.
+func (s *Store) Interrupt(ctx context.Context, name string) error {
+	if _, err := s.db.Exec(ctx, fmt.Sprintf(
+		`UPDATE %s SET interrupt_requested = true WHERE name = $1`, s.table), name); err != nil {
+		return fmt.Errorf("lease: interrupt %q: %w", name, err)
 	}
 	return nil
 }

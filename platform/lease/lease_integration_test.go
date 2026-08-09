@@ -23,7 +23,8 @@ const ddl = `
 CREATE TABLE IF NOT EXISTS test_leases (
     name       text PRIMARY KEY,
     owner      text NOT NULL,
-    expires_at timestamptz NOT NULL
+    expires_at timestamptz NOT NULL,
+    interrupt_requested boolean NOT NULL DEFAULT false
 );`
 
 func newStore(t *testing.T) (*lease.Store, context.Context) {
@@ -246,5 +247,69 @@ func TestHolderReportsOwnership(t *testing.T) {
 	}
 	if !held || owner != l.Owner() {
 		t.Errorf("Holder = (%q, %v), want (%q, true)", owner, held, l.Owner())
+	}
+}
+
+// TestInterruptReachesTheHolder is the P0-12 remainder: Close on a session whose
+// turn runs on ANOTHER replica must actually stop it.
+//
+// The holder learns on its next renewal, which is why Renew carries the signal
+// rather than a separate poll — see ErrInterrupted.
+func TestInterruptReachesTheHolder(t *testing.T) {
+	s, ctx := newStore(t)
+	name := "session-" + t.Name()
+
+	held, err := s.Acquire(ctx, name, time.Minute)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	// Healthy renewal first: no interrupt requested, so the holder continues.
+	if err := held.Renew(ctx, time.Minute); err != nil {
+		t.Fatalf("renew before interrupt: %v", err)
+	}
+
+	// Another replica (or an operator) asks it to stop.
+	if err := s.Interrupt(ctx, name); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	if err := held.Renew(ctx, time.Minute); !errors.Is(err, lease.ErrInterrupted) {
+		t.Fatalf("renew after interrupt = %v, want ErrInterrupted — the holder never learns to "+
+			"stop, so Close on a remote turn does nothing until the lease expires", err)
+	}
+}
+
+// TestInterruptOnAnUnheldLeaseIsNotAnError: the work may have finished a moment
+// before the interrupt arrived, and reporting that as a failure would make every
+// interrupt racy at the caller.
+func TestInterruptOnAnUnheldLeaseIsNotAnError(t *testing.T) {
+	s, ctx := newStore(t)
+	if err := s.Interrupt(ctx, "session-nobody-holds-this"); err != nil {
+		t.Fatalf("interrupting an unheld lease = %v, want nil", err)
+	}
+}
+
+// TestTakeoverClearsAStaleInterrupt: an interrupt is aimed at the WORK that was
+// running, not at the name. Leaving the flag set would abort the next holder for
+// a request the previous one already satisfied by stopping.
+func TestTakeoverClearsAStaleInterrupt(t *testing.T) {
+	s, ctx := newStore(t)
+	name := "session-" + t.Name()
+
+	if _, err := s.Acquire(ctx, name, 50*time.Millisecond); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := s.Interrupt(ctx, name); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	time.Sleep(120 * time.Millisecond)
+
+	next, err := s.Acquire(ctx, name, time.Minute)
+	if err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if err := next.Renew(ctx, time.Minute); err != nil {
+		t.Fatalf("the new holder inherited a stale interrupt (%v) — it would abort immediately "+
+			"for a request the previous holder already satisfied", err)
 	}
 }
