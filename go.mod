@@ -1,6 +1,6 @@
 module github.com/datakaveri/dx-common-go
 
-go 1.25.0
+go 1.26.5
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.3.2
