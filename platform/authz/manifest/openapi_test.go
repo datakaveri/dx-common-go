@@ -129,14 +129,19 @@ func TestRejectedDeclarations(t *testing.T) {
 		why  string
 	}{
 		{
-			name: "required with no permission",
+			// Still rejected — silence never authorizes. What changed is the
+			// message: it used to demand a permission, which for an
+			// identity-scoped listing does not exist, so the only way to
+			// satisfy it was to invent one. Naming all three classes is what
+			// stops the next author reaching for a placeholder.
+			name: "required with no authorization at all",
 			body: `
   /x:
     get:
       operationId: getX
       x-dx-authz: {authentication: required}
       responses: {"200": {description: ok}}`,
-			want: "identity alone",
+			want: "declare one of",
 			why:  "any authenticated caller would pass — authentication masquerading as authorization",
 		},
 		{

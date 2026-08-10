@@ -7,8 +7,6 @@ import (
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
-
-	"github.com/datakaveri/dx-common-go/platform/authz/vocabulary"
 )
 
 // Compiling a service's OpenAPI into a manifest (target design §3.2.1–3.2.2).
@@ -46,9 +44,11 @@ const extensionKey = "x-dx-authz"
 // silently discards a service's declaration would let an operator believe a
 // control is configured when the compiled artifact does not contain it.
 type authzExtension struct {
-	Authentication  string `json:"authentication"`
-	Permission      string `json:"permission,omitempty"`
-	DecisionProfile string `json:"decisionProfile,omitempty"`
+	Authentication  string   `json:"authentication"`
+	Authorization   string   `json:"authorization,omitempty"`
+	Permission      string   `json:"permission,omitempty"`
+	Roles           []string `json:"roles,omitempty"`
+	DecisionProfile string   `json:"decisionProfile,omitempty"`
 	Resource        *struct {
 		Type   string `json:"type"`
 		IDFrom string `json:"idFrom,omitempty"`
@@ -136,14 +136,18 @@ func FromOpenAPI(doc *openapi3.T, opts CompileOptions) (*Manifest, error) {
 				Method:         method,
 				Path:           path,
 				Authentication: AuthMode(ext.Authentication),
+				Authorization:  Authorization(ext.Authorization),
 				Permission:     ext.Permission,
+				Roles:          ext.Roles,
 			}
 			if ext.Resource != nil {
 				op.Resource = ResourceRef{Type: ext.Resource.Type, IDFrom: ext.Resource.IDFrom}
 			}
 
-			if errs := validateDeclared(where, op); len(errs) > 0 {
-				problems = append(problems, errs...)
+			if errs := ValidatePolicy(op); len(errs) > 0 {
+				for _, e := range errs {
+					problems = append(problems, where+": "+e)
+				}
 				continue
 			}
 			ops = append(ops, op)
@@ -191,55 +195,6 @@ func decodeExtension(raw any) (*authzExtension, error) {
 		return nil, err
 	}
 	return &ext, nil
-}
-
-// validateDeclared checks one operation's declaration against the vocabulary and
-// the manifest rules.
-func validateDeclared(where string, op Operation) []string {
-	var problems []string
-
-	switch op.Authentication {
-	case AuthRequired, AuthOptional, AuthNone:
-	case "":
-		problems = append(problems, fmt.Sprintf("%s: authentication is required", where))
-	default:
-		problems = append(problems, fmt.Sprintf(
-			"%s: authentication %q; want required, optional or none",
-			where, op.Authentication))
-	}
-
-	switch op.Authentication {
-	case AuthRequired, AuthOptional:
-		if op.Permission == "" {
-			problems = append(problems, fmt.Sprintf(
-				"%s: authentication %q but no permission — it would authorize on identity alone",
-				where, op.Authentication))
-			break
-		}
-		// THE CHECK THAT STOPS accessType COMING BACK. A service could
-		// otherwise declare `permission: api` and the gateway would faithfully
-		// check a relation the model does not define, which is exactly the
-		// defect AUTHZ-1 closed on the projection side.
-		if _, err := vocabulary.ParsePermission(op.Permission); err != nil {
-			problems = append(problems, fmt.Sprintf(
-				"%s: permission %q is not in the ratified vocabulary (%v) — a service may not "+
-					"invent one", where, op.Permission, vocabulary.Permissions()))
-		}
-	case AuthNone:
-		if op.Permission != "" {
-			problems = append(problems, fmt.Sprintf(
-				"%s: authentication is none but a permission %q is declared — one of the two "+
-					"is wrong, and guessing which would be guessing whether the operation is public",
-				where, op.Permission))
-		}
-	}
-
-	if op.Resource.IDFrom != "" {
-		if err := validateIDFrom(op.Resource.IDFrom, op.Path); err != nil {
-			problems = append(problems, fmt.Sprintf("%s: resource.idFrom: %v", where, err))
-		}
-	}
-	return problems
 }
 
 // validateIDFrom checks the extraction locator, including that a path parameter

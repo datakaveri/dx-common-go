@@ -26,6 +26,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/datakaveri/dx-common-go/platform/authz/vocabulary"
 )
 
 // SchemaVersion is the manifest format this build understands.
@@ -65,6 +67,67 @@ var (
 	ErrInvalid = errors.New("manifest: invalid")
 )
 
+// Authorization is HOW an operation is authorized once the caller is
+// authenticated — the question "authenticated as whom, and then what?".
+//
+// # Why this exists
+//
+// The manifest originally assumed every protected operation is resource-scoped:
+// a permission checked against one resource id. Compile rejected a protected
+// operation with no permission because it "would authorize on identity alone",
+// and as a DEFAULT that rejection is right — nobody should reach identity-only
+// authorization by forgetting to write a permission.
+//
+// But the dx-catalogue-go pilot found four operations for which authorizing on
+// identity alone is CORRECT, and no amount of care would make them fit:
+//
+//	myAssets / orgAssets / platformAssets — listings that return only the
+//	    caller's own assets. There is no single resource to check; the scoping
+//	    IS the authorization, and it happens inside the query.
+//	approveItem — an admin action gated by a realm role, not by any relation
+//	    the caller holds on the item being approved.
+//
+// Forcing those into `read` and `own` made the annotation look considered when
+// it was a placeholder, and a placeholder in a security artifact is worse than
+// a gap, because it stops anyone looking again.
+//
+// # The property that keeps this from being a hole
+//
+// Every class must be DECLARED. There is no inference from an absent permission
+// to AuthzIdentity — that is exactly the mistake Compile was right to reject.
+// An operation that states `authentication: required` and nothing else is still
+// an error; the difference is that the error now names three choices instead of
+// demanding a permission that may not exist.
+type Authorization string
+
+const (
+	// AuthzResource — a vocabulary permission is checked against one resource.
+	// The original and overwhelmingly common case. Inferred when a permission
+	// is present, so every existing annotation keeps its meaning exactly.
+	AuthzResource Authorization = "resource"
+
+	// AuthzIdentity — the verified identity IS the authorization, and the
+	// SERVICE scopes the result to that caller.
+	//
+	// The gateway enforces authentication and nothing further, which is the
+	// honest description of what it can do: "return only rows belonging to the
+	// caller" is a property of a query, not of a request, and no PEP outside
+	// the service can check it. Declaring this where the service does NOT
+	// scope its results is a defect this cannot catch — which is precisely why
+	// it must be written down per operation, where it shows up in a spec diff
+	// and can be reviewed, rather than inferred from silence.
+	AuthzIdentity Authorization = "identity"
+
+	// AuthzRole — the caller must hold one of the declared realm roles.
+	//
+	// Enforceable at the gateway today: roles come from the validated token.
+	// This is for administrative actions where the authority is a property of
+	// the caller rather than a relation on the object — approving an item is
+	// not something an item's owner may do, so no relation on the item is the
+	// right check.
+	AuthzRole Authorization = "role"
+)
+
 // ResourceRef says where an operation's resource id is found.
 //
 // This is the SHAPE half — a fact about the service's own API, which is why the
@@ -86,11 +149,18 @@ type Operation struct {
 	// Path is the template, e.g. /ogc/collections/{collectionId}/items.
 	Path string `json:"path" yaml:"path"`
 
-	// Authentication and Permission are the POLICY half.
+	// Authentication, Authorization, Permission and Roles are the POLICY half.
 	Authentication AuthMode `json:"authentication" yaml:"authentication"`
+	// Authorization is how the operation is authorized once authenticated.
+	// Empty means AuthzResource, which is what every permission-carrying
+	// annotation written before this field existed meant.
+	Authorization Authorization `json:"authorization,omitempty" yaml:"authorization,omitempty"`
 	// Permission is the vocabulary permission checked for this operation.
-	// Empty is legitimate only when Authentication is none.
+	// Set only for AuthzResource.
 	Permission string `json:"permission,omitempty" yaml:"permission,omitempty"`
+	// Roles are the realm roles that may invoke this operation, any one of
+	// which suffices. Set only for AuthzRole.
+	Roles []string `json:"roles,omitempty" yaml:"roles,omitempty"`
 
 	Resource ResourceRef `json:"resource,omitzero" yaml:"resource,omitempty"`
 
@@ -162,22 +232,14 @@ func Compile(m *Manifest) (*Compiled, error) {
 		}
 		seenIDs[op.OperationID] = true
 
-		switch op.Authentication {
-		case AuthRequired, AuthOptional, AuthNone:
-		default:
-			// No default branch: an operation whose authentication mode is
-			// unrecognised must not be guessed at, and guessing "required"
-			// would be as wrong as guessing "none" — one breaks the service,
-			// the other exposes it.
-			return nil, fmt.Errorf("%w: operation %q has authentication %q; want required, optional or none",
-				ErrInvalid, op.OperationID, op.Authentication)
-		}
-
-		// A protected operation with no permission cannot be checked against
-		// anything, so it would silently authorize on authentication alone.
-		if op.Authentication == AuthRequired && op.Permission == "" {
-			return nil, fmt.Errorf("%w: operation %q requires authentication but names no permission — "+
-				"it would authorize on identity alone", ErrInvalid, op.OperationID)
+		// One validator, called from here AND from FromOpenAPI. AUTHZ-1 found
+		// three hand-maintained copies of one relation contract with nothing
+		// checking them against each other; two copies of the policy rules
+		// would fail the same way, and the one that drifts is whichever is not
+		// on the path being tested.
+		if problems := ValidatePolicy(op); len(problems) > 0 {
+			return nil, fmt.Errorf("%w: operation %q: %s",
+				ErrInvalid, op.OperationID, strings.Join(problems, "; "))
 		}
 
 		method := strings.ToUpper(op.Method)
@@ -293,4 +355,159 @@ func (c *Compiled) Match(method, rawPath string) (Operation, map[string]string, 
 		}
 	}
 	return Operation{}, nil, ErrNoMatch
+}
+
+// ValidatePolicy checks one operation's POLICY half against the rules, and is
+// the only place those rules live.
+//
+// It returns every problem rather than the first: a service annotating forty
+// operations should get forty answers from one build.
+//
+// # The rule that closes the gap without opening one
+//
+// A protected operation must state HOW it is authorized. Before the
+// Authorization field existed the only expressible answer was "a permission on
+// a resource", so operations that are authorized by identity or by role were
+// annotated with a permission that did not describe them. Now there are three
+// answers — and still no fourth answer of "say nothing".
+func ValidatePolicy(op Operation) []string {
+	var problems []string
+
+	switch op.Authentication {
+	case AuthRequired, AuthOptional, AuthNone:
+	case "":
+		problems = append(problems, "authentication is required")
+	default:
+		// No default acceptance: an unrecognised mode must not be guessed at,
+		// and guessing "required" would be as wrong as guessing "none" — one
+		// breaks the service, the other exposes it.
+		problems = append(problems, fmt.Sprintf(
+			"authentication %q; want required, optional or none", op.Authentication))
+	}
+
+	authz := op.Authorization
+	if authz == "" && op.Permission != "" {
+		// Back-compatible inference, and the ONLY inference there is: an
+		// annotation that names a permission always meant a resource check.
+		// Nothing is inferred from silence.
+		authz = AuthzResource
+	}
+
+	if op.Authentication == AuthNone {
+		if op.Authorization != "" {
+			problems = append(problems, fmt.Sprintf(
+				"authentication is none but authorization %q is declared — a public operation "+
+					"authorizes nobody", op.Authorization))
+		}
+		if op.Permission != "" {
+			problems = append(problems, fmt.Sprintf(
+				"authentication is none but permission %q is declared — one of the two is wrong, "+
+					"and guessing which would be guessing whether the operation is public",
+				op.Permission))
+		}
+		if len(op.Roles) > 0 {
+			problems = append(problems, "authentication is none but roles are declared")
+		}
+		return append(problems, validateShape(op)...)
+	}
+
+	switch authz {
+	case AuthzResource:
+		if op.Permission == "" {
+			problems = append(problems, fmt.Sprintf(
+				"authentication %q with a resource check but no permission", op.Authentication))
+			break
+		}
+		// THE CHECK THAT STOPS accessType COMING BACK. A service could
+		// otherwise declare `permission: api` and the gateway would faithfully
+		// check a relation the model does not define — the defect AUTHZ-1
+		// closed on the projection side, re-entering through a spec.
+		if _, err := vocabulary.ParsePermission(op.Permission); err != nil {
+			problems = append(problems, fmt.Sprintf(
+				"permission %q is not in the ratified vocabulary (%v) — a service may not invent one",
+				op.Permission, vocabulary.Permissions()))
+		}
+		if len(op.Roles) > 0 {
+			problems = append(problems, "roles are declared but authorization is by resource permission")
+		}
+
+	case AuthzIdentity:
+		// The gateway enforces authentication and stops. Requiring
+		// `authentication: required` is not pedantry: with `optional`, an
+		// anonymous caller would pass a check whose entire content is "the
+		// caller is someone".
+		if op.Authentication != AuthRequired {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by identity but authentication is %q — an anonymous caller would "+
+					"pass a check whose whole content is that there is a caller", op.Authentication))
+		}
+		if op.Permission != "" {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by identity but permission %q is declared — identity scoping "+
+					"happens inside the service's query, where no permission is checked",
+				op.Permission))
+		}
+		if len(op.Roles) > 0 {
+			problems = append(problems, "authorization is by identity but roles are declared")
+		}
+
+	case AuthzRole:
+		if op.Authentication != AuthRequired {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by role but authentication is %q — a role cannot be read from a "+
+					"token that need not be present", op.Authentication))
+		}
+		if len(op.Roles) == 0 {
+			problems = append(problems, "authorization is by role but no roles are declared — "+
+				"the check would admit every authenticated caller")
+		}
+		for _, role := range op.Roles {
+			if strings.TrimSpace(role) == "" {
+				problems = append(problems, "an empty role is declared")
+			}
+		}
+		if op.Permission != "" {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by role but permission %q is declared", op.Permission))
+		}
+
+	case "":
+		// The gap-closing message. It replaces "requires authentication but
+		// names no permission", which demanded something that for some
+		// operations does not exist and so invited a placeholder.
+		problems = append(problems, fmt.Sprintf(
+			"authentication %q but no authorization — declare one of: "+
+				"`resource` with a permission, `identity` where the service scopes results to the "+
+				"caller, or `role` with the realm roles allowed", op.Authentication))
+
+	default:
+		problems = append(problems, fmt.Sprintf(
+			"authorization %q; want resource, identity or role", op.Authorization))
+	}
+
+	return append(problems, validateShape(op)...)
+}
+
+// validateShape checks the SHAPE half — the part the service owns.
+func validateShape(op Operation) []string {
+	if op.Resource.IDFrom == "" {
+		return nil
+	}
+	if err := validateIDFrom(op.Resource.IDFrom, op.Path); err != nil {
+		return []string{fmt.Sprintf("resource.idFrom: %v", err)}
+	}
+	return nil
+}
+
+// EffectiveAuthorization is the operation's authorization class after the one
+// inference the format allows.
+//
+// Callers MUST use this rather than reading the field: an annotation written
+// before the field existed carries a permission and an empty class, and reading
+// the raw field would make it look like an unauthorized operation.
+func (o Operation) EffectiveAuthorization() Authorization {
+	if o.Authorization == "" && o.Permission != "" {
+		return AuthzResource
+	}
+	return o.Authorization
 }
