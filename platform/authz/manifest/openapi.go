@@ -48,6 +48,7 @@ type authzExtension struct {
 	Authorization   string   `json:"authorization,omitempty"`
 	Permission      string   `json:"permission,omitempty"`
 	Roles           []string `json:"roles,omitempty"`
+	Workloads       []string `json:"workloads,omitempty"`
 	DecisionProfile string   `json:"decisionProfile,omitempty"`
 	Resource        *struct {
 		Type   string `json:"type"`
@@ -139,6 +140,7 @@ func FromOpenAPI(doc *openapi3.T, opts CompileOptions) (*Manifest, error) {
 				Authorization:  Authorization(ext.Authorization),
 				Permission:     ext.Permission,
 				Roles:          ext.Roles,
+				Workloads:      ext.Workloads,
 			}
 			if ext.Resource != nil {
 				op.Resource = ResourceRef{Type: ext.Resource.Type, IDFrom: ext.Resource.IDFrom}

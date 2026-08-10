@@ -169,13 +169,65 @@ func TestValidatePolicy(t *testing.T) {
 			why:  "a public operation has no caller to authorize",
 		},
 		{
+			name: "workload-gated internal endpoint",
+			op: manifest.Operation{
+				OperationID: "checkAuthorization", Method: "POST", Path: "/v1/check",
+				Authentication: manifest.AuthRequired,
+				Authorization:  manifest.AuthzWorkload,
+				Workloads:      []string{"dx-gateway-go"},
+			},
+			why: "the PDP answers about the subject in the REQUEST, so `identity` would be false, " +
+				"and its callers are services, which hold no realm roles",
+		},
+		{
+			name: "workload with no enumeration is allowed",
+			op: manifest.Operation{
+				OperationID: "checkAuthorization", Method: "POST", Path: "/v1/check",
+				Authentication: manifest.AuthRequired,
+				Authorization:  manifest.AuthzWorkload,
+			},
+			why: "unlike an empty role list, 'any verified workload' already excludes every end " +
+				"user — which is the boundary this class is drawn on",
+		},
+		{
+			name: "workload that also names roles",
+			op: manifest.Operation{
+				OperationID: "x", Method: "POST", Path: "/x",
+				Authentication: manifest.AuthRequired,
+				Authorization:  manifest.AuthzWorkload,
+				Roles:          []string{"cos_admin"},
+			},
+			want: "a service holds no realm roles",
+			why:  "mixing them means the author has not decided whether the caller is a person",
+		},
+		{
+			name: "workload with optional authentication",
+			op: manifest.Operation{
+				OperationID: "x", Method: "POST", Path: "/x",
+				Authentication: manifest.AuthOptional,
+				Authorization:  manifest.AuthzWorkload,
+			},
+			want: "not a gate",
+		},
+		{
+			name: "role class that names workloads",
+			op: manifest.Operation{
+				OperationID: "x", Method: "POST", Path: "/x",
+				Authentication: manifest.AuthRequired,
+				Authorization:  manifest.AuthzRole,
+				Roles:          []string{"cos_admin"},
+				Workloads:      []string{"dx-gateway-go"},
+			},
+			want: "workloads are declared but authorization is by role",
+		},
+		{
 			name: "unknown class",
 			op: manifest.Operation{
 				OperationID: "x", Method: "GET", Path: "/x",
 				Authentication: manifest.AuthRequired,
 				Authorization:  manifest.Authorization("tenant"),
 			},
-			want: "want resource, identity or role",
+			want: "want resource, identity, role or workload",
 			why:  "an unrecognised class must not fall through to any behaviour",
 		},
 	}

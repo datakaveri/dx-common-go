@@ -118,6 +118,28 @@ const (
 	// and can be reviewed, rather than inferred from silence.
 	AuthzIdentity Authorization = "identity"
 
+	// AuthzWorkload — the caller must be a verified WORKLOAD, not an end user.
+	//
+	// Found by annotating dx-authz-go. Its /v1/check is the PDP: it answers
+	// "may subject S do R on object O" for any S the caller names, and its
+	// gateway route carries `require_authn: true` — so ANY authenticated user
+	// could ask it anything, which is an oracle for the entire access graph.
+	// Nothing in the service constrains the caller.
+	//
+	// None of the other classes describe it. `identity` is false — the PDP
+	// answers about the subject in the REQUEST, not the caller, so it does not
+	// scope anything to whoever asked. `role` is the wrong axis: the callers
+	// are services, which hold no realm roles. The distinction being drawn is
+	// human versus machine, and that is what workload identity (ADR-06) is.
+	//
+	// Workloads may be enumerated, and empty means "any verified workload".
+	// That is deliberately unlike AuthzRole, where an empty list is rejected:
+	// an empty role list admits every authenticated caller and is therefore no
+	// gate, whereas "any verified workload" already excludes every end user,
+	// which is the boundary this class is drawn on. Enumerating is tighter and
+	// is preferred where the caller set is stable.
+	AuthzWorkload Authorization = "workload"
+
 	// AuthzRole — the caller must hold one of the declared realm roles.
 	//
 	// Enforceable at the gateway today: roles come from the validated token.
@@ -161,6 +183,9 @@ type Operation struct {
 	// Roles are the realm roles that may invoke this operation, any one of
 	// which suffices. Set only for AuthzRole.
 	Roles []string `json:"roles,omitempty" yaml:"roles,omitempty"`
+	// Workloads are the workload identities that may invoke this operation.
+	// Set only for AuthzWorkload; empty there means any verified workload.
+	Workloads []string `json:"workloads,omitempty" yaml:"workloads,omitempty"`
 
 	Resource ResourceRef `json:"resource,omitzero" yaml:"resource,omitempty"`
 
@@ -408,6 +433,9 @@ func ValidatePolicy(op Operation) []string {
 		if len(op.Roles) > 0 {
 			problems = append(problems, "authentication is none but roles are declared")
 		}
+		if len(op.Workloads) > 0 {
+			problems = append(problems, "authentication is none but workloads are declared")
+		}
 		return append(problems, validateShape(op)...)
 	}
 
@@ -430,6 +458,9 @@ func ValidatePolicy(op Operation) []string {
 		if len(op.Roles) > 0 {
 			problems = append(problems, "roles are declared but authorization is by resource permission")
 		}
+		if len(op.Workloads) > 0 {
+			problems = append(problems, "workloads are declared but authorization is by resource permission")
+		}
 
 	case AuthzIdentity:
 		// The gateway enforces authentication and stops. Requiring
@@ -450,8 +481,35 @@ func ValidatePolicy(op Operation) []string {
 		if len(op.Roles) > 0 {
 			problems = append(problems, "authorization is by identity but roles are declared")
 		}
+		if len(op.Workloads) > 0 {
+			problems = append(problems, "authorization is by identity but workloads are declared")
+		}
+
+	case AuthzWorkload:
+		if op.Authentication != AuthRequired {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by workload but authentication is %q — a workload credential "+
+					"that need not be present is not a gate", op.Authentication))
+		}
+		if op.Permission != "" {
+			problems = append(problems, fmt.Sprintf(
+				"authorization is by workload but permission %q is declared — a workload holds "+
+					"no relation on a resource", op.Permission))
+		}
+		if len(op.Roles) > 0 {
+			problems = append(problems, "authorization is by workload but realm roles are "+
+				"declared — a service holds no realm roles; that is the distinction this class draws")
+		}
+		for _, w := range op.Workloads {
+			if strings.TrimSpace(w) == "" {
+				problems = append(problems, "an empty workload id is declared")
+			}
+		}
 
 	case AuthzRole:
+		if len(op.Workloads) > 0 {
+			problems = append(problems, "workloads are declared but authorization is by role")
+		}
 		if op.Authentication != AuthRequired {
 			problems = append(problems, fmt.Sprintf(
 				"authorization is by role but authentication is %q — a role cannot be read from a "+
@@ -478,11 +536,12 @@ func ValidatePolicy(op Operation) []string {
 		problems = append(problems, fmt.Sprintf(
 			"authentication %q but no authorization — declare one of: "+
 				"`resource` with a permission, `identity` where the service scopes results to the "+
-				"caller, or `role` with the realm roles allowed", op.Authentication))
+				"caller, `role` with the realm roles allowed, or `workload` where the caller must "+
+				"be a service rather than a person", op.Authentication))
 
 	default:
 		problems = append(problems, fmt.Sprintf(
-			"authorization %q; want resource, identity or role", op.Authorization))
+			"authorization %q; want resource, identity, role or workload", op.Authorization))
 	}
 
 	return append(problems, validateShape(op)...)
