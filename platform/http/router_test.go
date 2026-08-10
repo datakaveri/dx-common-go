@@ -350,3 +350,31 @@ func TestRouter_DocsSeeRelativePaths(t *testing.T) {
 		}
 	}
 }
+
+// TestOptionalOrPublicWithRolesIsARegistrationPanic.
+//
+// Optional short-circuits before the role gate, and Public never reaches it, so
+// either combination declares a role restriction that nothing enforces.
+//
+// This cannot be caught by drift: the spec and the route would agree about the
+// roles while no request was ever checked against them. It has to fail where
+// the two options are written together.
+func TestOptionalOrPublicWithRolesIsARegistrationPanic(t *testing.T) {
+	for name, rt := range map[string]httpx.Route{
+		"optional": {Method: "GET", Path: "/x", Handler: okHandler(),
+			Optional: true, Roles: []string{"cos_admin"}, OpID: "x"},
+		"public": {Method: "GET", Path: "/x", Handler: okHandler(),
+			Public: true, Roles: []string{"cos_admin"}, OpID: "x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("registration succeeded — the route declares a role gate that never " +
+						"runs, and nothing downstream can tell")
+				}
+			}()
+			httpx.NewRouter(httpx.RouterSpec{Base: "/"},
+				httpx.RouteSet{Prefix: "/", Routes: []httpx.Route{rt}})
+		})
+	}
+}

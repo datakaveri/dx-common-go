@@ -208,6 +208,30 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 		base = "/"
 	}
 
+	// A route cannot be Optional AND carry Roles: Optional short-circuits below
+	// and the roles would be silently dropped, leaving a route that DECLARES a
+	// role gate and enforces nothing.
+	//
+	// A panic at registration rather than a validation error, because this is
+	// unreachable in a correct program and reachable only by writing the two
+	// options together — the same reasoning as the Handle/HandleOptional
+	// pairing check. A drift check cannot catch it: the spec and the route
+	// would agree about the roles while nothing enforced them.
+	for _, set := range sets {
+		for _, rt := range set.Routes {
+			if rt.Optional && len(rt.Roles) > 0 {
+				panic("httpx.NewRouter: " + rt.Method + " " + set.Prefix + rt.Path +
+					" declares both Optional and Roles — Optional serves anonymous callers, so " +
+					"the role gate would never run. Drop one.")
+			}
+			if rt.Public && len(rt.Roles) > 0 {
+				panic("httpx.NewRouter: " + rt.Method + " " + set.Prefix + rt.Path +
+					" declares both Public and Roles — a public route has no subject to read " +
+					"roles from. Drop one.")
+			}
+		}
+	}
+
 	r.Route(base, func(br chi.Router) {
 		public, protected := splitRoutes(sets)
 

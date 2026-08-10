@@ -131,13 +131,8 @@ func AssertNoDrift(t TB, m *manifest.Manifest, sets []httpx.RouteSet, exempt ...
 		if !strings.EqualFold(op.Method, r.Method) {
 			t.Errorf("%q is %s in the router and %s in the spec", id, r.Method, op.Method)
 		}
-		// Public on one side and not the other means one layer is protecting
-		// what the other is not.
-		specPublic := op.Authentication == manifest.AuthNone
-		if specPublic != r.Public {
-			t.Errorf("%q: router Public=%v but spec authentication=%q — one layer authenticates "+
-				"this operation and the other does not", id, r.Public, op.Authentication)
-		}
+		checkAuthentication(t, id, r, op)
+		checkRoles(t, id, r, op)
 	}
 
 	exemptSet := map[string]bool{}
@@ -162,6 +157,89 @@ func sortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		out = append(out, k)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// checkAuthentication compares the router's posture with the spec's.
+//
+// The router expresses it as two booleans and an absence; the spec as one enum.
+// The mapping is total, which is what makes it checkable:
+//
+//	Public              ⟺ authentication: none
+//	Optional            ⟺ authentication: optional
+//	neither             ⟺ authentication: required   (requireSubject applies)
+//
+// "neither" carrying meaning is the sharp edge. A route is protected because an
+// option is ABSENT, so deleting httpx.Optional() from a line silently makes an
+// operation stricter and adding it silently makes one anonymous — neither shows
+// up as a changed value in review. This is where that becomes visible.
+func checkAuthentication(t TB, id string, r httpx.Route, op manifest.Operation) {
+	t.Helper()
+
+	var want manifest.AuthMode
+	switch {
+	case r.Public:
+		want = manifest.AuthNone
+	case r.Optional:
+		want = manifest.AuthOptional
+	default:
+		want = manifest.AuthRequired
+	}
+
+	if op.Authentication == want {
+		return
+	}
+
+	// The message names the ROUTER's shape, not just the mismatch: an author
+	// reading "want required" needs to know it came from the absence of an
+	// option rather than from something they can grep for.
+	t.Errorf("%q: spec says authentication=%q but the router says %q "+
+		"(Public=%v, Optional=%v) — one layer authenticates this operation and the other "+
+		"does not", id, op.Authentication, want, r.Public, r.Optional)
+}
+
+// checkRoles compares the role gate on both sides.
+//
+// A role can be declared at the gateway (the manifest) and at the service
+// (httpx.Roles), and before this nothing compared them. Three independent
+// declarations of one fact is the shape AUTHZ-1 already paid for once with
+// accessType — the difference here is that the GATEWAY enforces the manifest,
+// so a spec that disagrees with the service wins a disagreement it should lose.
+//
+// Roles are compared as SETS. Requiring the same order would make a
+// cosmetic reordering a failure, and a check that fails for cosmetic reasons is
+// one people learn to re-run until it passes.
+func checkRoles(t TB, id string, r httpx.Route, op manifest.Operation) {
+	t.Helper()
+
+	specRoles := op.Roles
+	if op.EffectiveAuthorization() != manifest.AuthzRole {
+		specRoles = nil
+	}
+
+	if len(specRoles) == 0 && len(r.Roles) == 0 {
+		return
+	}
+	if len(specRoles) == 0 {
+		t.Errorf("%q: the router restricts it to %v but the spec declares no role gate — the "+
+			"gateway would admit a caller the service then refuses", id, r.Roles)
+		return
+	}
+	if len(r.Roles) == 0 {
+		t.Errorf("%q: the spec restricts it to %v but the router does not — the gate exists only "+
+			"at the gateway, so anything reaching the service directly bypasses it",
+			id, specRoles)
+		return
+	}
+	if a, b := sortedCopy(specRoles), sortedCopy(r.Roles); strings.Join(a, ",") != strings.Join(b, ",") {
+		t.Errorf("%q: spec roles %v, router roles %v — the gateway enforces the spec, so the "+
+			"difference is what the service is not checking", id, a, b)
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
 	sort.Strings(out)
 	return out
 }
