@@ -138,6 +138,12 @@ func TestPanicInATaskDoesNotKillTheProcess(t *testing.T) {
 // registering a task outside the lock that guards `draining` lets Shutdown's
 // Wait run at the instant a task is unregistered, reporting a clean drain while
 // a goroutine is still starting. Run with -race.
+//
+// It also caught a SECOND defect, which is why the final Shutdown below is not
+// decoration: Shutdown used to return nil immediately once `draining` was set,
+// and called that idempotent. The second caller was therefore told the drain
+// had completed while the first was still waiting on it. This test failed
+// roughly one run in twenty; -count is what surfaced it.
 func TestConcurrentGoAndShutdown(t *testing.T) {
 	e := executor.New(nil)
 
@@ -160,7 +166,9 @@ func TestConcurrentGoAndShutdown(t *testing.T) {
 	go func() { _ = e.Shutdown(context.Background()) }()
 	wg.Wait()
 
-	// Drain whatever was accepted.
+	// Drain whatever was accepted. This is a SECOND Shutdown while the first
+	// may still be running, and it must wait for the real drain rather than
+	// return on the "already draining" path.
 	_ = e.Shutdown(context.Background())
 
 	if got, want := ended.Load(), started.Load(); got != want {

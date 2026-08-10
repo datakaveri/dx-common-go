@@ -60,7 +60,11 @@ type Executor struct {
 	mu       sync.Mutex
 	wg       sync.WaitGroup
 	draining bool
-	inFlight int
+	// drainOnce guards the single cancel-and-wait; drained is closed when it
+	// finishes, so concurrent Shutdown callers all observe the real outcome.
+	drainOnce sync.Once
+	drained   chan struct{}
+	inFlight  int
 }
 
 // New builds an Executor. log may be nil.
@@ -73,7 +77,7 @@ func New(log *zap.Logger) *Executor {
 	// moment the response is written — which is the bug that makes people reach
 	// for `go func()` with a detached context in the first place.
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Executor{log: log, ctx: ctx, cancel: cancel}
+	return &Executor{log: log, ctx: ctx, cancel: cancel, drained: make(chan struct{})}
 }
 
 // Go runs fn on a goroutine this Executor owns.
@@ -135,23 +139,31 @@ func (e *Executor) InFlight() int {
 // one task hung or a hundred were mid-flight.
 func (e *Executor) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
-	if e.draining {
-		e.mu.Unlock()
-		return nil // idempotent: a closer may run twice on a racing signal
-	}
 	e.draining = true
 	e.mu.Unlock()
 
-	e.cancel()
-
-	done := make(chan struct{})
-	go func() {
-		e.wg.Wait()
-		close(done)
-	}()
+	// EVERY caller waits for the drain, not just the first.
+	//
+	// This used to return nil immediately when `draining` was already set, and
+	// called that idempotent. It is not: a second closer racing on the same
+	// signal was told the drain had COMPLETED while the first was still
+	// waiting on it, and a caller that treats a nil Shutdown as "work is
+	// finished" then exits the process and kills exactly the in-flight tasks
+	// this package exists to drain.
+	//
+	// The cancel-and-wait runs once; the channel is what every caller selects
+	// on, so idempotent now means "safe to call twice AND both callers get the
+	// truth" rather than "the second call is a no-op".
+	e.drainOnce.Do(func() {
+		e.cancel()
+		go func() {
+			e.wg.Wait()
+			close(e.drained)
+		}()
+	})
 
 	select {
-	case <-done:
+	case <-e.drained:
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("executor: %d task(s) still running at shutdown deadline: %w",
