@@ -89,6 +89,16 @@ func (v *Verifier) Audience() string { return v.audience }
 // Enforcement returns the configured rollout stage.
 func (v *Verifier) Enforcement() Enforcement { return v.enforcement }
 
+// Close releases the underlying JWKS refresh goroutine. Register it with
+// bootstrap (App.Closer) so key-refresh work stops at shutdown. Nil-safe, so a
+// disabled verifier that never built a validator is safe to close.
+func (v *Verifier) Close() error {
+	if v == nil || v.validator == nil {
+		return nil
+	}
+	return v.validator.Close()
+}
+
 // Verify checks a raw workload token and returns the calling workload.
 func (v *Verifier) Verify(token string) (Principal, error) {
 	if token == "" {

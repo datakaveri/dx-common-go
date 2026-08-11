@@ -22,19 +22,16 @@ type Config struct {
 	Audience string `mapstructure:"audience"`
 	// LeewaySeconds is added to expiry/nbf/iat checks to account for clock skew.
 	LeewaySeconds int `mapstructure:"leeway_seconds"`
-	// RefreshInterval controls how often the JWKS cache is refreshed.
+	// RefreshInterval controls how often the JWKS cache is refreshed. Unset (or
+	// non-positive) selects a 5-minute default.
 	//
-	// ⚠ CURRENTLY INERT (ROADMAP P1-9). NewKeycloakJWKS computes a value from
-	// this and then calls keyfunc.NewDefaultCtx, which takes no interval and
-	// uses the library's own defaults — so every refresh_interval in every
-	// config file in the fleet, including the workload_verifier blocks, has no
-	// effect. Found by golangci-lint (ineffassign) on 2026-08-07.
-	//
-	// Key rotation still WORKS: jwkset's default client re-fetches on an
-	// unknown kid, which is what the workload rotation test exercises. What
-	// does not work is controlling the cadence, so an operator tuning this
-	// knob gets silence. Fixing it means constructing the jwkset HTTP client
-	// with explicit options — a fleet-wide auth change, hence its own item.
+	// This is now the effective cadence (ROADMAP P1-9, fixed 2026-08-11).
+	// NewKeycloakJWKS constructs the jwkset HTTP client with this interval
+	// explicitly, rather than the previous keyfunc.NewDefaultCtx, which ignored
+	// it and refreshed hourly regardless — so an operator tuning this knob was
+	// getting silence. A brand-new kid is still picked up immediately by the
+	// unknown-kid refetch; the interval governs how quickly a rotation of the
+	// material behind an EXISTING kid is followed.
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 	// Enabled controls whether JWT validation is active. Set false for local dev.
 	Enabled bool `mapstructure:"enabled"`

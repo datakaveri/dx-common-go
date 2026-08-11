@@ -11,6 +11,7 @@ import (
 // Validator validates JWTs issued by Keycloak against a live JWKS.
 type Validator struct {
 	cfg    Config
+	jwks   *KeycloakJWKS
 	keyfn  gojwt.Keyfunc
 	parser *gojwt.Parser
 }
@@ -45,9 +46,20 @@ func New(cfg Config) (*Validator, error) {
 
 	return &Validator{
 		cfg:    cfg,
+		jwks:   jwks,
 		keyfn:  jwks.Keyfunc(),
 		parser: gojwt.NewParser(parserOpts...),
 	}, nil
+}
+
+// Close releases the validator's JWKS refresh goroutine. Register it with
+// bootstrap (App.Closer) so key-refresh work stops at shutdown. Nil-safe and
+// idempotent.
+func (v *Validator) Close() error {
+	if v == nil || v.jwks == nil {
+		return nil
+	}
+	return v.jwks.Close()
 }
 
 // Validate parses tokenString, verifies the signature via JWKS, and checks
