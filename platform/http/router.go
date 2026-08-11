@@ -66,7 +66,7 @@ type Route struct {
 type AuthSpec struct {
 	// Authenticate verifies the caller and puts a Subject on the context. It is
 	// supplied rather than constructed here so platform/http stays free of any
-	// dependency on JWT or HMAC verification — an edge package should route and
+	// dependency on JWT or workload verification — an edge package should route and
 	// render, not decide what a valid credential is.
 	Authenticate func(http.Handler) http.Handler
 	// AllowAnonymous lets an unauthenticated request reach a non-Public route.

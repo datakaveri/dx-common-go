@@ -97,7 +97,7 @@ func RequireCaller(ids ...string) func(http.Handler) http.Handler {
 //
 // It keys off the subject id rather than the signature, because the question is
 // "is this request carrying a user identity", not "is that identity signed" —
-// under Required the HMAC signature is gone but the subject headers remain.
+// the HMAC signature is gone (P0-17 stage 2) but the subject headers remain.
 func assertsSubject(h http.Header) bool {
 	return h.Get(dxheaders.HdrSubjectID) != ""
 }

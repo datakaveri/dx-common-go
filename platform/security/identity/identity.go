@@ -1,7 +1,8 @@
 // Package identity carries the platform's notion of who is making a request.
 //
 // A Subject is pure data: it is produced by whatever verified the caller (a JWT
-// validator, HMAC identity headers signed by the gateway, an app-credential
+// validator, X-Subject-* identity headers projected by the gateway (unsigned
+// since P0-17 stage 2), an app-credential
 // exchange) and consumed everywhere else. It contains no verification logic, so
 // nothing downstream can be tricked into re-deriving trust from it.
 //

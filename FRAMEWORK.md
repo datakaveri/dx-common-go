@@ -57,7 +57,7 @@ the low-level client.
 |---|---|
 | `auth` | `DxUser` + context helpers |
 | `auth/jwt` | Keycloak JWKS validation |
-| `auth/resolver` | HMAC identity headers → `DxUser` middleware |
+| `auth/resolver` | X-Subject-* identity headers → `DxUser` middleware |
 | `auth/fga` | OpenFGA REST client (`Check`, tuple writes) |
 | `auth/appid` | M2M app-credential gRPC + Keycloak token source |
 | `auth/authorization` | role/scope helpers |

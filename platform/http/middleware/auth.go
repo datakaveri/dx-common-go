@@ -51,18 +51,18 @@ type AuthConfig struct {
 	// on the request, so a service with no Workload verifier rejects every
 	// subject header rather than trusting a client-supplied one.
 	TrustSubjectHeaders bool
-	// JWT enables a direct Bearer path alongside HMAC, for an operator calling
+	// JWT enables a direct Bearer path alongside the subject headers, for an operator calling
 	// a service without going through the gateway.
 	JWT dxjwt.Config
 
 	// Workload authenticates the CALLING SERVICE, which is a different question
-	// from the one above: HMACSecret and JWT establish *which user* a request
+	// from the one above: the subject headers and JWT establish *which user* a request
 	// speaks for, this establishes *which workload* is speaking.
 	//
 	// Under the shared HMAC those two collapsed into one — possession of the
 	// secret was authority to assert any user to any service (review finding
 	// C-02, ROADMAP P0-2). Separating them is the fix, and it is why this is a
-	// distinct field rather than another flag on the HMAC path.
+	// distinct field rather than another flag on the subject-header path.
 	//
 	// NIL DISABLES IT, which is the rollout default: a service that pulls this
 	// library and changes nothing behaves exactly as before. Build a verifier
@@ -75,9 +75,10 @@ type AuthConfig struct {
 // context, for httpx.Actor and the router's auth gate to read.
 //
 // It wraps the existing auth resolver rather than reimplementing verification —
-// HMAC-first with a JWT fallback, and an invalid HMAC never falls through to
-// JWT, which is the property that stops a forged header downgrading into an
-// unauthenticated-but-accepted request. This is a TRANSITIONAL bridge: the
+// subject headers first with a JWT fallback. Those headers carry no signature
+// since P0-17 stage 2; what stops a forged header being accepted is the
+// workload gate below, which refuses to read them at all unless a verified
+// caller presented them. This is a TRANSITIONAL bridge: the
 // resolver writes the legacy auth.DxUser, and this converts it to the platform
 // Subject so migrated handlers see one identity type. It goes away with the
 // legacy auth package in Wave 4.

@@ -8,7 +8,7 @@ import (
 // Gateway security event names — only these traffic classes are shipped to
 // the durable gateway_access_log; ordinary 2xx traffic stays in stdout logs.
 const (
-	EventAuthFailed    = "AUTH_FAILED"     // 401: token / HMAC / appID rejected
+	EventAuthFailed    = "AUTH_FAILED"     // 401: token / workload / appID rejected
 	EventAccessDenied  = "ACCESS_DENIED"   // 403: FGA relation check denied
 	EventRouteNotFound = "ROUTE_NOT_FOUND" // 404: no upstream matched
 	EventUpstreamError = "UPSTREAM_ERROR"  // 5xx from / on behalf of upstream

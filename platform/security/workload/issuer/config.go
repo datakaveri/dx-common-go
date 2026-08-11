@@ -8,7 +8,7 @@ import (
 // Config is how a service obtains credentials for the workloads it CALLS.
 type Config struct {
 	// Enabled turns minting on. A caller that is not yet migrated leaves it
-	// false and keeps signing HMAC headers.
+	// false, and calls then carry unsigned subject headers only.
 	Enabled bool `mapstructure:"enabled"`
 
 	// TokenURL is the Keycloak token endpoint, e.g.

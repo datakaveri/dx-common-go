@@ -304,11 +304,11 @@ func TestCheckSecret(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := config.CheckSecret("internal_auth.shared_secret", tt.value)
+			err := config.CheckSecret("keycloak.admin_secret", tt.value)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("CheckSecret(%q) error = %v, wantErr %v", tt.value, err, tt.wantErr)
 			}
-			if err != nil && !contains(err.Error(), "internal_auth.shared_secret") {
+			if err != nil && !contains(err.Error(), "keycloak.admin_secret") {
 				t.Errorf("the error must name the setting, got %q", err)
 			}
 		})
