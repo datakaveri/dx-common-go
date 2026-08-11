@@ -282,7 +282,9 @@ func Compile(m *Manifest) (*Compiled, error) {
 		// by declaration order would make authorization depend on the order
 		// someone happened to write the endpoints in.
 		for _, existing := range out.byMethod[method] {
-			if templatesOverlap(existing.segments, segs) {
+			if templatesOverlap(existing.segments, segs) &&
+				!moreSpecific(existing.segments, segs) &&
+				!moreSpecific(segs, existing.segments) {
 				return nil, fmt.Errorf("%w: %q and %q can both match one request",
 					ErrAmbiguous, existing.OperationID, op.OperationID)
 			}
@@ -340,6 +342,45 @@ func templatesOverlap(a, b []segment) bool {
 	return true
 }
 
+// moreSpecific reports whether a is STRICTLY more specific than b.
+//
+// # Why this exists
+//
+// Rejecting every overlap as ambiguous was too strict, and it blocked a real
+// service. `GET /challenge/bookmarked` and `GET /challenge/{id}` overlap — the
+// first request path matches both — but they are not ambiguous in any useful
+// sense: a literal segment beats a parameter, which is how OpenAPI itself
+// defines precedence ("concrete path first") and how every router in this fleet
+// already behaves. That pattern is everywhere: a collection with named
+// sub-views alongside a by-id lookup.
+//
+// What must STILL be rejected is overlap where neither side wins:
+//
+//	/a/{x}/b   and   /a/c/{y}
+//
+// Position 1 favours the second, position 2 favours the first, so which one
+// serves /a/c/b would depend on declaration order — and authorization that
+// depends on the order someone wrote the endpoints in is the thing Compile
+// exists to prevent.
+//
+// So: a is strictly more specific when it is literal wherever they differ in
+// kind, and never the reverse.
+func moreSpecific(a, b []segment) bool {
+	var aWins bool
+	for i := range a {
+		aLiteral := a[i].param == ""
+		bLiteral := b[i].param == ""
+		switch {
+		case aLiteral && !bLiteral:
+			aWins = true
+		case bLiteral && !aLiteral:
+			// b is more specific somewhere, so a cannot be strictly more so.
+			return false
+		}
+	}
+	return aWins
+}
+
 // Match resolves a request to its operation and path parameters.
 //
 // It returns ErrNoMatch when nothing matches, and the caller MUST deny — that
@@ -359,6 +400,15 @@ func (c *Compiled) Match(method, rawPath string) (Operation, map[string]string, 
 		reqSegs = strings.Split(strings.TrimPrefix(path, "/"), "/")
 	}
 
+	// The MOST SPECIFIC match wins, not the first one found. Returning the
+	// first would make the answer depend on declaration order for the
+	// literal-vs-parameter overlaps Compile now permits — and order-dependent
+	// authorization is exactly what Compile's ambiguity check exists to stop.
+	var (
+		best       Operation
+		bestParams map[string]string
+		found      bool
+	)
 	for _, op := range c.byMethod[strings.ToUpper(method)] {
 		if len(op.segments) != len(reqSegs) {
 			continue
@@ -375,9 +425,15 @@ func (c *Compiled) Match(method, rawPath string) (Operation, map[string]string, 
 				break
 			}
 		}
-		if ok {
-			return op, params, nil
+		if !ok {
+			continue
 		}
+		if !found || moreSpecific(op.segments, best.segments) {
+			best, bestParams, found = op, params, true
+		}
+	}
+	if found {
+		return best, bestParams, nil
 	}
 	return Operation{}, nil, ErrNoMatch
 }

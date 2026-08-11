@@ -259,3 +259,114 @@ func TestPermissionsAreVocabularyPermissions(t *testing.T) {
 		}
 	}
 }
+
+// Literal-versus-parameter precedence (added for dx-community-layer-go).
+//
+// Compile used to reject EVERY overlap as ambiguous. That was too strict and it
+// blocked a real service: `GET /challenge/bookmarked` and `GET /challenge/{id}`
+// overlap, but a literal beats a parameter — which is how OpenAPI defines
+// precedence and how every router in this fleet already behaves. A collection
+// with named sub-views next to a by-id lookup is an ordinary shape, not a
+// defect.
+//
+// What must STILL be rejected is overlap where neither side wins, because then
+// the answer would depend on declaration order — and order-dependent
+// authorization is the thing Compile exists to prevent.
+
+func opAt(id, method, path string) manifest.Operation {
+	return manifest.Operation{
+		OperationID: id, Method: method, Path: path,
+		Authentication: manifest.AuthRequired, Authorization: manifest.AuthzIdentity,
+	}
+}
+
+func TestLiteralBeatsParameter(t *testing.T) {
+	c, err := manifest.Compile(manifestOf(
+		opAt("byID", "GET", "/challenge/{id}"),
+		opAt("bookmarked", "GET", "/challenge/bookmarked"),
+		opAt("participated", "GET", "/challenge/participated"),
+	))
+	if err != nil {
+		t.Fatalf("a literal-vs-parameter overlap was rejected as ambiguous: %v", err)
+	}
+
+	for path, want := range map[string]string{
+		"/challenge/bookmarked":    "bookmarked",
+		"/challenge/participated":  "participated",
+		"/challenge/c-1":           "byID",
+		"/challenge/anything-else": "byID",
+	} {
+		op, params, err := c.Match("GET", path)
+		if err != nil {
+			t.Errorf("%s did not match: %v", path, err)
+			continue
+		}
+		if op.OperationID != want {
+			t.Errorf("%s matched %q, want %q — the most specific template must win, and it "+
+				"must not depend on declaration order", path, op.OperationID, want)
+		}
+		if want == "byID" && params["id"] == "" {
+			t.Errorf("%s matched byID but bound no id", path)
+		}
+	}
+}
+
+// TestDeclarationOrderDoesNotDecide is the property that makes the above safe.
+// Compiling the same set in the opposite order must give the same answers.
+func TestDeclarationOrderDoesNotDecide(t *testing.T) {
+	forward, err := manifest.Compile(manifestOf(
+		opAt("byID", "GET", "/challenge/{id}"),
+		opAt("bookmarked", "GET", "/challenge/bookmarked"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse, err := manifest.Compile(manifestOf(
+		opAt("bookmarked", "GET", "/challenge/bookmarked"),
+		opAt("byID", "GET", "/challenge/{id}"),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/challenge/bookmarked", "/challenge/c-1"} {
+		a, _, err1 := forward.Match("GET", path)
+		b, _, err2 := reverse.Match("GET", path)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("%s: %v / %v", path, err1, err2)
+		}
+		if a.OperationID != b.OperationID {
+			t.Errorf("%s resolves to %q or %q depending on declaration order — which is "+
+				"exactly the failure the ambiguity check exists to prevent",
+				path, a.OperationID, b.OperationID)
+		}
+	}
+}
+
+// TestGenuineAmbiguityIsStillRejected: neither template is more specific, so
+// which one serves /a/c/b would depend on the order they were written in.
+func TestGenuineAmbiguityIsStillRejected(t *testing.T) {
+	_, err := manifest.Compile(manifestOf(
+		opAt("first", "GET", "/a/{x}/b"),
+		opAt("second", "GET", "/a/c/{y}"),
+	))
+	if err == nil {
+		t.Fatal("two templates that trade specificity position by position were ACCEPTED — " +
+			"/a/c/b matches both and neither wins, so the answer would depend on order")
+	}
+	if !errors.Is(err, manifest.ErrAmbiguous) {
+		t.Errorf("error is %v, want ErrAmbiguous", err)
+	}
+}
+
+// TestSameShapeIsStillAmbiguous: two parameters in the same position cannot be
+// told apart at all.
+func TestSameShapeIsStillAmbiguous(t *testing.T) {
+	_, err := manifest.Compile(manifestOf(
+		opAt("byID", "GET", "/challenge/{id}"),
+		opAt("bySlug", "GET", "/challenge/{slug}"),
+	))
+	if err == nil {
+		t.Fatal("two identically-shaped templates were accepted — nothing can distinguish them")
+	}
+}
