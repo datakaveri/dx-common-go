@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,10 +92,48 @@ func SetPathValueFunc(f PathValueFunc) {
 // into the service — both of which defeat the point of hiding it.
 func PathValue(r *http.Request, name string) string { return pathValue(r, name) }
 
-// maxBodyBytes caps a request body when the caller has not already capped it.
-// Absent fleet-wide today, which makes every JSON endpoint a memory-exhaustion
-// vector.
-const maxBodyBytes = 1 << 20 // 1 MiB
+// maxBodyKey carries the router's effective request-body cap on the context.
+type maxBodyKey struct{}
+
+// withMaxBodyBytes records the effective body cap for a request. The router's
+// carryMaxBody middleware sets it from RouterSpec.MaxBodyBytes so the binder
+// and BodyReader enforce the operator-configured limit rather than a hard-coded
+// one — which is what makes SERVER_MAX_BODY_BYTES actually change the limit.
+func withMaxBodyBytes(ctx context.Context, n int64) context.Context {
+	return context.WithValue(ctx, maxBodyKey{}, n)
+}
+
+// maxBodyBytesFrom reports the effective body cap and whether the router
+// installed one. A value of 0 means the cap is disabled (unlimited); absence
+// (ok=false) means the request did not pass through the platform router — a
+// unit test calling bind directly, say — and the caller applies the default.
+func maxBodyBytesFrom(ctx context.Context) (int64, bool) {
+	n, ok := ctx.Value(maxBodyKey{}).(int64)
+	return n, ok
+}
+
+// BodyReader returns the request body bounded by the router's configured cap.
+//
+// A custom Binder that reads the body itself — multipart, a non-JSON content
+// type, a whole-body document that cannot be a tagged field — should read
+// through this rather than r.Body directly, so its reads honour the same
+// SERVER_MAX_BODY_BYTES policy as the JSON path and cannot silently exceed it.
+// It is safe off the platform stack too: with no configured cap it applies
+// DefaultMaxBodyBytes. A negative configured cap means unlimited and returns
+// the body unwrapped, for a service that streams and bounds its own upload.
+func BodyReader(r *http.Request) io.Reader {
+	if r.Body == nil {
+		return http.NoBody
+	}
+	limit, ok := maxBodyBytesFrom(r.Context())
+	if !ok {
+		limit = DefaultMaxBodyBytes
+	}
+	if limit <= 0 {
+		return r.Body
+	}
+	return http.MaxBytesReader(nil, r.Body, limit)
+}
 
 // bind decodes an inbound request into Req.
 //
@@ -239,7 +278,20 @@ func decodeBody(v reflect.Value, r *http.Request) error {
 		return nil
 	}
 
-	body := http.MaxBytesReader(nil, r.Body, maxBodyBytes)
+	// The router's carryMaxBody middleware records the effective cap on the
+	// context. When the request did not pass through it — a unit test calling
+	// bind directly, or a service mounting a handler without NewRouter — fall
+	// back to the platform default so an unbounded body still cannot exhaust
+	// memory on the JSON path.
+	limit, ok := maxBodyBytesFrom(r.Context())
+	if !ok {
+		limit = DefaultMaxBodyBytes
+	}
+	body := r.Body
+	if limit > 0 {
+		body = http.MaxBytesReader(nil, r.Body, limit)
+	}
+
 	dec := json.NewDecoder(body)
 	// An unknown field is a client error worth reporting: silently ignoring it
 	// is how a caller spends an afternoon wondering why their field had no
@@ -254,9 +306,22 @@ func decodeBody(v reflect.Value, r *http.Request) error {
 		}
 		var maxErr *http.MaxBytesError
 		if ok := asMaxBytes(err, &maxErr); ok {
-			return errors.Validation(fmt.Sprintf("request body exceeds the %d byte limit", maxBodyBytes))
+			// Report the limit that actually tripped, not a constant — an
+			// operator who raised SERVER_MAX_BODY_BYTES must see their number.
+			return errors.Validation(fmt.Sprintf("request body exceeds the %d byte limit", maxErr.Limit))
 		}
 		return errors.Validation("invalid JSON body: " + err.Error())
+	}
+
+	// The body must be a SINGLE JSON document. A json.Decoder stops at the end
+	// of the first value and ignores whatever follows, so without this check
+	// `{...}{...}` or `{...} trailing junk` is silently accepted — a
+	// request-smuggling shape where a fronting proxy and the service can
+	// disagree about where the body ends. A second Decode returns io.EOF for a
+	// well-formed single document (trailing whitespace included); anything else
+	// is a second value or trailing garbage and is rejected.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return errors.Validation("request body must contain a single JSON document")
 	}
 	return nil
 }

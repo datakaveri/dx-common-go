@@ -110,6 +110,14 @@ type RouterSpec struct {
 	// a deadline kills an SSE stream mid-flight.
 	Timeout time.Duration
 
+	// MaxBodyBytes caps a request body on the binding path. Zero selects
+	// DefaultMaxBodyBytes (1 MiB); NEGATIVE disables the cap for a service that
+	// enforces its own bound on a streaming upload. The limit reaches the JSON
+	// binder and httpx.BodyReader through the request context, so a custom
+	// Binder that reads the body itself honours the same policy. Feed it from
+	// config.Server.MaxBodyBytes so SERVER_MAX_BODY_BYTES is the effective cap.
+	MaxBodyBytes int64
+
 	// CORS configures the CORS middleware. Nil selects DefaultCORS(), which
 	// matches what the gin stack served, so migrating changes nothing a
 	// browser can observe.
@@ -233,6 +241,12 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 	}
 
 	r.Route(base, func(br chi.Router) {
+		// Carry the effective body cap so the binder and BodyReader enforce the
+		// operator-configured limit for every route under Base. Registered
+		// before any route on br, as chi requires, and only under Base — the
+		// health, metrics and docs endpoints decode no bodies.
+		br.Use(carryMaxBody(resolveMaxBodyBytes(spec.MaxBodyBytes)))
+
 		public, protected := splitRoutes(sets)
 
 		// perRoute adds the timeout and compression, which are per-route rather

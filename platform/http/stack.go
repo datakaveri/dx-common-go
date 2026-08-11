@@ -51,6 +51,14 @@ import (
 // how long a slow upstream is tolerated.
 const DefaultTimeout = 30 * time.Second
 
+// DefaultMaxBodyBytes caps a request body when a service does not choose its
+// own limit. 1 MiB is ample for the JSON these APIs accept and small enough
+// that an unbounded body cannot exhaust memory. A service that must accept
+// larger bodies — GeoJSON in dx-dataplane-ogc-go, uploads in
+// dx-files-connect-api-go — raises RouterSpec.MaxBodyBytes, and one that
+// streams and bounds its own upload sets it negative to opt out.
+const DefaultMaxBodyBytes = 1 << 20 // 1 MiB
+
 // compressionLevel is gzip's default. Higher costs CPU on every response for
 // single-digit percentage gains on the JSON these services return.
 const compressionLevel = 5
@@ -267,5 +275,38 @@ func resolveTimeout(d time.Duration) time.Duration {
 		return 0
 	default:
 		return d
+	}
+}
+
+// resolveMaxBodyBytes maps the RouterSpec value onto an effective cap: zero
+// takes the default, negative disables it. Mirrors resolveTimeout, and for the
+// same reason — zero is what a struct literal that omitted the field produces,
+// and "forgot to set it" must not be how a service ends up with no body limit
+// at all.
+func resolveMaxBodyBytes(n int64) int64 {
+	switch {
+	case n == 0:
+		return DefaultMaxBodyBytes
+	case n < 0:
+		return 0 // disabled — unlimited
+	default:
+		return n
+	}
+}
+
+// carryMaxBody records the effective request-body cap on the context so the
+// JSON binder and BodyReader enforce the operator-configured limit.
+//
+// It does NOT wrap r.Body. A blanket MaxBytesReader at the default would
+// truncate the services that legitimately read larger bodies themselves —
+// dx-files-connect-api-go streams 64 MiB uploads, dx-dataplane-ogc-go accepts
+// multi-megabyte GeoJSON — before their own bound ever ran. Enforcement is at
+// the point of the read instead: decodeBody for the JSON path, BodyReader for
+// a custom Binder, each reading this limit.
+func carryMaxBody(n int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(withMaxBodyBytes(r.Context(), n)))
+		})
 	}
 }
