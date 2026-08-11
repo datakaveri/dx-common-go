@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+// Package dx.credits.v1 is the credit ledger's internal contract.
+//
+// It exists for one caller today: dx-user-go, which must provision a credit
+// account before granting the `compute` realm role. A user holding compute with
+// no ledger entry cannot compute, so the two operations belong together — and
+// they live in different services because the ROLE is identity state and the
+// LEDGER is not.
+//
+// The legacy Java platform kept both in one package
+// (org.cdpg.dx.aaa.credit.handler.ComputeRoleHandler, with compute_role created
+// in the same migration as the credit tables). The Go split separates them, and
+// this contract is what puts them back in touch without merging the services.
+package dx.credits.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/creditspb;creditspb";
+
+// CreditsService serves ledger operations to other platform services.
+//
+// Internal only. External credit access goes through the gateway to
+// dx-credits-go's REST surface; this exists so services do not have to hold a
+// user's token to act on that user's behalf.
+service CreditsService {
+  // EnsureAccount creates the user's credit account if it does not exist.
+  //
+  // IDEMPOTENT BY CONTRACT, not by convention. The caller grants a role after
+  // this returns, and a retry after a network timeout must not create a second
+  // account or reset a balance. Callers may invoke it any number of times.
+  rpc EnsureAccount(EnsureAccountRequest) returns (EnsureAccountResponse);
+}
+
+message EnsureAccountRequest {
+  // The user whose account is being provisioned.
+  //
+  // # Why a user id IS a body field here, unlike dx.catalogue.v1
+  //
+  // The catalogue contract deliberately keeps the subject out of the message
+  // because there it identifies the CALLER, and a caller-supplied identity is
+  // an unauthenticated claim (ADR-06).
+  //
+  // Here the field is a TARGET, not a claim: an administrator provisions an
+  // account for somebody else. The caller's own authority still travels as
+  // verified workload identity in metadata and is checked by the interceptor —
+  // this field says who the work is FOR, and answers nothing about who asked.
+  string user_id = 1;
+}
+
+message EnsureAccountResponse {
+  // True when this call created the account, false when one already existed.
+  //
+  // Not an error either way — that is what idempotent means. It is returned so
+  // the caller can log provisioning honestly rather than reporting a creation
+  // that did not happen.
+  bool created = 1;
+
+  // The account's current balance, in the ledger's smallest unit.
+  int64 balance = 2;
+}
