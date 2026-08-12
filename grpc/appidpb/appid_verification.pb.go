@@ -288,6 +288,8 @@ type CheckItemAccessResponse struct {
 	AccessPolicy       string                 `protobuf:"bytes,4,opt,name=access_policy,json=accessPolicy,proto3" json:"access_policy,omitempty"`
 	ResourceServerJson string                 `protobuf:"bytes,5,opt,name=resource_server_json,json=resourceServerJson,proto3" json:"resource_server_json,omitempty"` // JSON-encoded resourceServer array
 	PoliciesJson       string                 `protobuf:"bytes,6,opt,name=policies_json,json=policiesJson,proto3" json:"policies_json,omitempty"`                     // JSON-encoded policies array
+	HasOwnerAccess     bool                   `protobuf:"varint,7,opt,name=has_owner_access,json=hasOwnerAccess,proto3" json:"has_owner_access,omitempty"`            // caller is the item owner — full access, no policy needed
+	HasAdminAccess     bool                   `protobuf:"varint,8,opt,name=has_admin_access,json=hasAdminAccess,proto3" json:"has_admin_access,omitempty"`            // caller is an admin — full access, no policy needed
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -362,6 +364,20 @@ func (x *CheckItemAccessResponse) GetPoliciesJson() string {
 		return x.PoliciesJson
 	}
 	return ""
+}
+
+func (x *CheckItemAccessResponse) GetHasOwnerAccess() bool {
+	if x != nil {
+		return x.HasOwnerAccess
+	}
+	return false
+}
+
+func (x *CheckItemAccessResponse) GetHasAdminAccess() bool {
+	if x != nil {
+		return x.HasAdminAccess
+	}
+	return false
 }
 
 // ── ResolveDelegation ──────────────────────────────────────────────────────
@@ -784,7 +800,7 @@ const file_appid_verification_proto_rawDesc = "" +
 	"\x16CheckItemAccessRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1b\n" +
 	"\tentity_id\x18\x02 \x01(\tR\bentityId\x12\x10\n" +
-	"\x03did\x18\x03 \x01(\tR\x03did\"\xe0\x01\n" +
+	"\x03did\x18\x03 \x01(\tR\x03did\"\xb4\x02\n" +
 	"\x17CheckItemAccessResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x1d\n" +
 	"\n" +
@@ -792,7 +808,9 @@ const file_appid_verification_proto_rawDesc = "" +
 	"\x03iid\x18\x03 \x01(\tR\x03iid\x12#\n" +
 	"\raccess_policy\x18\x04 \x01(\tR\faccessPolicy\x120\n" +
 	"\x14resource_server_json\x18\x05 \x01(\tR\x12resourceServerJson\x12#\n" +
-	"\rpolicies_json\x18\x06 \x01(\tR\fpoliciesJson\"d\n" +
+	"\rpolicies_json\x18\x06 \x01(\tR\fpoliciesJson\x12(\n" +
+	"\x10has_owner_access\x18\a \x01(\bR\x0ehasOwnerAccess\x12(\n" +
+	"\x10has_admin_access\x18\b \x01(\bR\x0ehasAdminAccess\"d\n" +
 	"\x18ResolveDelegationRequest\x12#\n" +
 	"\rdelegator_sub\x18\x01 \x01(\tR\fdelegatorSub\x12#\n" +
 	"\rdelegatee_sub\x18\x02 \x01(\tR\fdelegateeSub\"\x9b\x04\n" +
