@@ -81,6 +81,7 @@ type Builder struct {
 	allowedSortFields   map[string]struct{}
 	defaultSortBy       string
 	defaultOrder        string
+	tieBreak            string
 	apiToDBMap          map[string]string
 	fuzzyFiltersDBMap   map[string]string
 	extraParams         map[string]struct{}
@@ -131,6 +132,42 @@ func (b *Builder) DefaultSort(field, order string) *Builder {
 		b.defaultOrder = order
 	}
 	return b
+}
+
+// TieBreak sets a unique column appended to EVERY resolved sort — the default
+// and a caller-supplied ?sort alike — so rows that share the leading sort value
+// keep a stable order across pages (ROADMAP P1-6). Without it a non-unique sort
+// such as created_at lets two requests for the same page return different rows,
+// and a row can be seen twice or skipped while paging.
+//
+// Pass a column with a UNIQUE constraint — the table's primary key is the usual
+// choice (qualify it, e.g. "c.id", when the query aliases the table). It is
+// appended in the direction of the least-significant existing sort key, and is
+// skipped if that column is already in the sort, so it never double-sorts.
+func (b *Builder) TieBreak(column string) *Builder {
+	b.tieBreak = column
+	return b
+}
+
+// withTieBreak appends the unique tie-breaker to a resolved sort unless it is
+// already present. A sort whose last key is already unique is left untouched.
+func (b *Builder) withTieBreak(orders []query.OrderBy) []query.OrderBy {
+	if b.tieBreak == "" {
+		return orders
+	}
+	for _, o := range orders {
+		if o.Column == b.tieBreak {
+			return orders
+		}
+	}
+	// Align with the least-significant existing key's direction (defaulting to
+	// the configured default order) so the total order reads consistently and
+	// is monotonic for a future keyset cursor.
+	desc := strings.EqualFold(b.defaultOrder, "desc")
+	if n := len(orders); n > 0 {
+		desc = orders[n-1].Desc
+	}
+	return append(orders, query.OrderBy{Column: b.tieBreak, Desc: desc})
 }
 
 // FuzzyFiltersDBMap sets the api-param → db-column allowlist for ILIKE filters.
@@ -213,9 +250,10 @@ func (b *Builder) Build() (PaginatedRequest, error) {
 func (b *Builder) extractSort(sortParam string) ([]query.OrderBy, error) {
 	if sortParam == "" {
 		if b.defaultSortBy != "" {
-			return []query.OrderBy{{Column: b.defaultSortBy, Desc: strings.EqualFold(b.defaultOrder, "desc")}}, nil
+			return b.withTieBreak([]query.OrderBy{{Column: b.defaultSortBy, Desc: strings.EqualFold(b.defaultOrder, "desc")}}), nil
 		}
-		return nil, nil
+		// Even with no default sort, a tie-break alone gives a stable order.
+		return b.withTieBreak(nil), nil
 	}
 	items := strings.Split(sortParam, ";")
 	if len(items) > maxSortFields {
@@ -241,7 +279,7 @@ func (b *Builder) extractSort(sortParam string) ([]query.OrderBy, error) {
 		}
 		orders = append(orders, query.OrderBy{Column: col, Desc: dir == "desc"})
 	}
-	return orders, nil
+	return b.withTieBreak(orders), nil
 }
 
 func (b *Builder) extractTemporal(q map[string][]string) ([]query.TemporalFilter, error) {

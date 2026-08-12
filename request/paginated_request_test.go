@@ -103,6 +103,57 @@ func TestBuild_DefaultSortApplied(t *testing.T) {
 	}
 }
 
+// TestBuild_TieBreak pins ROADMAP P1-6: a unique tie-breaker is appended to
+// every resolved sort so a non-unique leading key (created_at) cannot let two
+// requests for the same page return different rows.
+func TestBuild_TieBreak(t *testing.T) {
+	t.Run("appended to the default sort, aligned with its direction", func(t *testing.T) {
+		pr, err := req("").DefaultSort("created_at", "desc").TieBreak("id").Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pr.OrderBy) != 2 {
+			t.Fatalf("want [created_at, id], got %+v", pr.OrderBy)
+		}
+		if pr.OrderBy[0].Column != "created_at" || !pr.OrderBy[0].Desc {
+			t.Fatalf("primary key wrong: %+v", pr.OrderBy[0])
+		}
+		if pr.OrderBy[1].Column != "id" || !pr.OrderBy[1].Desc {
+			t.Fatalf("tie-break should be id desc (aligned with created_at desc): %+v", pr.OrderBy[1])
+		}
+	})
+
+	t.Run("appended to a caller sort", func(t *testing.T) {
+		pr, err := req("sort=title:asc").AllowedSortFields("title").TieBreak("id").Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pr.OrderBy) != 2 || pr.OrderBy[1].Column != "id" || pr.OrderBy[1].Desc {
+			t.Fatalf("want [title asc, id asc], got %+v", pr.OrderBy)
+		}
+	})
+
+	t.Run("not double-appended when the sort already ends on it", func(t *testing.T) {
+		pr, err := req("sort=id:desc").AllowedSortFields("id").TieBreak("id").Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pr.OrderBy) != 1 || pr.OrderBy[0].Column != "id" {
+			t.Fatalf("must not double-sort on the tie-break, got %+v", pr.OrderBy)
+		}
+	})
+
+	t.Run("a lone tie-break gives a stable order with no default sort", func(t *testing.T) {
+		pr, err := req("").TieBreak("id").Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pr.OrderBy) != 1 || pr.OrderBy[0].Column != "id" {
+			t.Fatalf("want a lone id tie-break, got %+v", pr.OrderBy)
+		}
+	})
+}
+
 func TestConditions_RendersFiltersAndFuzzy(t *testing.T) {
 	pr, _ := req("status=ACTIVE&q=climate").
 		AllowedFiltersDBMap(map[string]string{"status": "status"}).
