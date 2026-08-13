@@ -42,6 +42,10 @@ type PaginatedRequest struct {
 	FuzzyFilters map[string]string      // db_column -> ILIKE term
 	OrderBy      []query.OrderBy        // allowlist-mapped sort columns
 	Temporal     []query.TemporalFilter // time-relation filters
+	// Cursor is an opaque keyset token from a previous page's nextCursor. When
+	// set, the repository should keyset-paginate (repository.FindKeyset) and
+	// ignore Page; when empty it offset-paginates as before. Additive.
+	Cursor string
 }
 
 // Limit returns the SQL LIMIT (== Size).
@@ -244,6 +248,7 @@ func (b *Builder) Build() (PaginatedRequest, error) {
 		FuzzyFilters: fuzzy,
 		OrderBy:      orderBy,
 		Temporal:     temporal,
+		Cursor:       strings.TrimSpace(q.Get("cursor")),
 	}, nil
 }
 
@@ -313,7 +318,7 @@ func (b *Builder) extractTemporal(q map[string][]string) ([]query.TemporalFilter
 
 func (b *Builder) allowedQueryParams() map[string]struct{} {
 	allowed := map[string]struct{}{
-		"page": {}, "size": {}, "sort": {}, "search_term": {},
+		"page": {}, "size": {}, "sort": {}, "cursor": {}, "search_term": {},
 		"time": {}, "endtime": {}, "timerel": {},
 	}
 	for k := range b.allowedFiltersDBMap {

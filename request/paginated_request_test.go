@@ -96,6 +96,16 @@ func TestBuild_RejectsDisallowedSortField(t *testing.T) {
 	}
 }
 
+func TestBuild_Cursor(t *testing.T) {
+	pr, err := req("cursor=xyz&size=5").Build()
+	if err != nil {
+		t.Fatalf("cursor must be an allowed param and parse: %v", err)
+	}
+	if pr.Cursor != "xyz" {
+		t.Errorf("Cursor = %q, want xyz", pr.Cursor)
+	}
+}
+
 func TestBuild_DefaultSortApplied(t *testing.T) {
 	pr, _ := req("").DefaultSort("created_at", "desc").Build()
 	if len(pr.OrderBy) != 1 || pr.OrderBy[0].Column != "created_at" || !pr.OrderBy[0].Desc {

@@ -11,15 +11,22 @@ import (
 // offset/limit. Three parsers disagreed about this, which is how 10 of 11
 // OpenAPI specs came to document offset/limit while one documented page/size.
 const (
-	ParamPage = "page"
-	ParamSize = "size"
-	ParamSort = "sort"
+	ParamPage   = "page"
+	ParamSize   = "size"
+	ParamSort   = "sort"
+	ParamCursor = "cursor"
 )
 
 // Params is a parsed list request: the page window plus any requested sort.
+//
+// Cursor is an OPAQUE keyset token from a previous page's nextCursor. It is
+// additive: when present the endpoint keyset-paginates (stable under concurrent
+// inserts, O(page) at any depth) and Page/Sort are ignored; when absent the
+// endpoint offset-paginates exactly as before. A client chooses which to use.
 type Params struct {
 	Request
-	Sort []SortKey
+	Sort   []SortKey
+	Cursor string
 }
 
 // Parse reads page, size and sort from an inbound request.
@@ -68,7 +75,11 @@ func parse(q url.Values, rawSort string) (Params, error) {
 	if err != nil {
 		return Params{}, err
 	}
-	return Params{Request: NewRequest(page, size), Sort: keys}, nil
+	return Params{
+		Request: NewRequest(page, size),
+		Sort:    keys,
+		Cursor:  strings.TrimSpace(q.Get(ParamCursor)),
+	}, nil
 }
 
 // Strict is Parse plus rejection of unknown query parameters.
@@ -86,8 +97,8 @@ func Strict(r *http.Request, known ...string) (Params, error) {
 }
 
 func rejectUnknown(q url.Values, known []string) error {
-	allowed := make(map[string]struct{}, len(known)+3)
-	for _, k := range []string{ParamPage, ParamSize, ParamSort} {
+	allowed := make(map[string]struct{}, len(known)+4)
+	for _, k := range []string{ParamPage, ParamSize, ParamSort, ParamCursor} {
 		allowed[k] = struct{}{}
 	}
 	for _, k := range known {

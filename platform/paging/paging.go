@@ -79,6 +79,12 @@ type Info struct {
 	TotalPages  int   `json:"totalPages"`
 	HasNext     bool  `json:"hasNext"`
 	HasPrevious bool  `json:"hasPrevious"`
+	// NextCursor is the opaque token for the next KEYSET page, present only on a
+	// cursor-paginated response and omitted on the last page and on every
+	// offset-paginated response — so an offset client's contract is unchanged.
+	// A keyset response leaves the offset fields (page/totalCount/totalPages)
+	// zero: keyset deliberately avoids the COUNT they would need.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // NewInfo builds the response metadata for a 1-based page of the given size
@@ -107,6 +113,22 @@ func NewInfo(page, size int, totalCount int64) Info {
 
 // InfoFor is NewInfo for an already-parsed Request.
 func InfoFor(r Request, totalCount int64) Info { return NewInfo(r.Page, r.Size, totalCount) }
+
+// KeysetInfo builds the response metadata for a KEYSET (cursor) page. nextCursor
+// is the token for the following page, or "" when this is the last one. There is
+// no total count by design — keyset pagination exists precisely to avoid the
+// COUNT that fills TotalCount/TotalPages — so those and Page stay zero and a
+// client pages by following NextCursor until it is absent.
+func KeysetInfo(size int, nextCursor string) Info {
+	if size < 1 {
+		size = DefaultSize
+	}
+	return Info{
+		Size:       size,
+		HasNext:    nextCursor != "",
+		NextCursor: nextCursor,
+	}
+}
 
 // Page is one page of results plus its metadata — the value a repository
 // returns and an HTTP handler renders.
