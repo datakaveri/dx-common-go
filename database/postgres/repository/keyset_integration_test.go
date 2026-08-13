@@ -11,11 +11,13 @@ import (
 )
 
 // TestFindKeyset_RealDB exercises the whole keyset path against a live Postgres:
-// the seek predicate compares the decoded cursor key — a time.Time that
-// round-trips through JSON as an RFC3339 *string* — against a real timestamptz
-// column. That string-vs-timestamp comparison is the one thing the codec and
-// SQL-shape unit tests cannot prove, and every keyset adopter (dx-audit-go,
-// dx-community-layer-go) depends on it, so it gets a real database.
+// the seek predicate compares the decoded cursor values — which round-trip
+// through JSON as *strings* (a time.Time as RFC3339, an id as text) — against
+// real typed columns. Whether pgx lets those string params compare against a
+// timestamptz and, crucially, a uuid column is the one thing the codec and
+// SQL-shape unit tests cannot prove, and it is exactly where an adopter would
+// silently break. Both id column types the fleet uses are covered: text
+// (dx-audit-go's varchar ids) and uuid (dx-community-layer-go's).
 //
 // Opt-in: set PG_INTEGRATION_DSN (e.g. the local stack's
 // postgres://postgres:postgres@localhost:5433/postgres). Skipped otherwise, so
@@ -33,35 +35,49 @@ func TestFindKeyset_RealDB(t *testing.T) {
 	}
 	defer pool.Close()
 
-	const table = "keyset_it_probe"
+	t.Run("text ids (audit-shaped)", func(t *testing.T) {
+		walkKeyset(t, ctx, pool, "text", func(i int) string { return fmt.Sprintf("c-%02d", i) })
+	})
+	t.Run("uuid ids (community-shaped)", func(t *testing.T) {
+		// Monotonic uuids so their binary order matches i, keeping the tie-region
+		// assertion (higher i sorts first under DESC) valid.
+		walkKeyset(t, ctx, pool, "uuid", func(i int) string {
+			return fmt.Sprintf("00000000-0000-0000-0000-%012d", i)
+		})
+	})
+}
+
+// walkKeyset seeds a probe table whose id column is idType, then pages
+// FindKeyset through it following NextCursor, and asserts full coverage with no
+// dupes or gaps and a total (id-DESC) order across a run of rows that tie on
+// created_at.
+func walkKeyset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, idType string, mkID func(int) string) {
+	t.Helper()
+
+	table := "keyset_it_probe_" + idType
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
 	if _, err := pool.Exec(ctx,
-		`CREATE TABLE `+table+` (id text PRIMARY KEY, created_at timestamptz NOT NULL)`); err != nil {
+		fmt.Sprintf(`CREATE TABLE %s (id %s PRIMARY KEY, created_at timestamptz NOT NULL)`, table, idType)); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	defer pool.Exec(ctx, `DROP TABLE IF EXISTS `+table)
 
-	// 25 rows. A shared timestamp on three of them forces the tie-breaker (id)
-	// to carry the order — the exact case a non-unique sort key creates.
+	// 25 rows; three share a created_at (i=10..12) so the id tie-breaker must
+	// carry the order — the exact case a non-unique sort key creates.
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	type want struct {
-		id string
-		ts time.Time
-	}
-	var inserted []want
+	var count int
 	for i := 0; i < 25; i++ {
 		ts := base.Add(time.Duration(i) * time.Minute)
 		if i >= 10 && i <= 12 {
-			ts = base.Add(10 * time.Minute) // three rows tie on created_at
+			ts = base.Add(10 * time.Minute)
 		}
-		id := fmt.Sprintf("c-%02d", i)
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO `+table+` (id, created_at) VALUES ($1, $2)`, id, ts); err != nil {
-			t.Fatalf("insert %s: %v", id, err)
+			fmt.Sprintf(`INSERT INTO %s (id, created_at) VALUES ($1, $2)`, table), mkID(i), ts); err != nil {
+			t.Fatalf("insert %s: %v", mkID(i), err)
 		}
-		inserted = append(inserted, want{id, ts})
+		count++
 	}
 
 	type ksRow struct {
@@ -70,8 +86,8 @@ func TestFindKeyset_RealDB(t *testing.T) {
 	}
 	repo := New[ksRow](pool, WithTable[ksRow](table))
 
-	// Page through newest-first, following NextCursor until it is empty. If the
-	// string-vs-timestamp seek were broken this Query would error here.
+	// Page newest-first, following NextCursor until empty. A broken
+	// string-vs-column seek would error on the very first Query.
 	const pageSize = 7
 	var got []string
 	cursor := ""
@@ -93,10 +109,8 @@ func TestFindKeyset_RealDB(t *testing.T) {
 		cursor = page.NextCursor
 	}
 
-	// Expected order: created_at DESC, then id DESC among the tied rows.
-	// Ties are c-10..c-12 → DESC id gives c-12, c-11, c-10.
-	if len(got) != len(inserted) {
-		t.Fatalf("walked %d rows across pages, want %d (dupes or gaps): %v", len(got), len(inserted), got)
+	if len(got) != count {
+		t.Fatalf("walked %d rows across pages, want %d (dupes or gaps): %v", len(got), count, got)
 	}
 	seen := map[string]bool{}
 	for _, id := range got {
@@ -105,12 +119,13 @@ func TestFindKeyset_RealDB(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	// Spot-check the tie region keeps a total, id-DESC order.
+	// The tied rows (i=10..12) must keep a total, id-DESC order.
 	pos := map[string]int{}
 	for i, id := range got {
 		pos[id] = i
 	}
-	if !(pos["c-12"] < pos["c-11"] && pos["c-11"] < pos["c-10"]) {
-		t.Fatalf("tied rows out of id-DESC order: c-12@%d c-11@%d c-10@%d", pos["c-12"], pos["c-11"], pos["c-10"])
+	hi, mid, lo := mkID(12), mkID(11), mkID(10)
+	if !(pos[hi] < pos[mid] && pos[mid] < pos[lo]) {
+		t.Fatalf("tied rows out of id-DESC order: %s@%d %s@%d %s@%d", hi, pos[hi], mid, pos[mid], lo, pos[lo])
 	}
 }
