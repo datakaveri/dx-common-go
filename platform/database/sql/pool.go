@@ -2,8 +2,8 @@ package sql
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -324,8 +324,14 @@ func asPgError(err error, target **pgconn.PgError) bool {
 	return false
 }
 
+// isNoRows reports a "no rows" result by identity, via the error chain — not by
+// matching the message text. A wrapped error whose message merely CONTAINS
+// "no rows in result set" (a scan of user data, a different failure that quotes
+// it) must not be misclassified as NotFound; only pgx.ErrNoRows itself, however
+// wrapped with %w, is one (ROADMAP P2-2). Every caller here passes the pgx error
+// straight from Scan/Exec, so the chain reaches the sentinel intact.
 func isNoRows(err error) bool {
-	return err != nil && strings.Contains(err.Error(), pgx.ErrNoRows.Error())
+	return errors.Is(err, pgx.ErrNoRows)
 }
 
 // acquireLock takes a session-level advisory lock on a dedicated connection and

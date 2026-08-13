@@ -167,6 +167,12 @@ func group(o op, ps []Pred) Pred {
 // `metadata @> ?` and pass the value, never fmt.Sprintf the value in. Values
 // are still bound as parameters; use ? as the placeholder and the builder
 // numbers it.
+//
+// A LITERAL question mark — PostgreSQL's JSONB key-exists operators ?, ?| and
+// ?& — is written DOUBLED, so it is not mistaken for a placeholder: `tags ?? ?`
+// renders `tags ? $n` (does the array contain the bound key), and `tags ??| ?`
+// renders `tags ?| $n`. Without this the operator's ? was consumed as a
+// placeholder and the query silently changed shape (ROADMAP P2-2).
 func Raw(fragment string, values ...any) Pred {
 	return Pred{op: opRaw, raw: fragment, values: values}
 }
@@ -215,15 +221,26 @@ func placeholder(args *[]any, v any) string {
 	return "$" + strconv.Itoa(len(*args))
 }
 
-// numberPlaceholders replaces each ? in a raw fragment with the next $n.
+// numberPlaceholders replaces each ? placeholder in a raw fragment with the
+// next $n. A DOUBLED ?? is an escaped literal question mark — the JSONB
+// key-exists operators ?, ?|, ?& — emitted as a single ? and never numbered, so
+// `tags ?? ?` binds one value against the JSONB operator rather than two
+// (ROADMAP P2-2). A ? with no value left is passed through unchanged, as before.
 func numberPlaceholders(fragment string, args *[]any, values []any) string {
 	var b strings.Builder
 	vi := 0
 	for i := 0; i < len(fragment); i++ {
-		if fragment[i] == '?' && vi < len(values) {
-			b.WriteString(placeholder(args, values[vi]))
-			vi++
-			continue
+		if fragment[i] == '?' {
+			if i+1 < len(fragment) && fragment[i+1] == '?' {
+				b.WriteByte('?') // escaped literal ? (a JSONB operator), collapse ?? -> ?
+				i++
+				continue
+			}
+			if vi < len(values) {
+				b.WriteString(placeholder(args, values[vi]))
+				vi++
+				continue
+			}
 		}
 		b.WriteByte(fragment[i])
 	}
