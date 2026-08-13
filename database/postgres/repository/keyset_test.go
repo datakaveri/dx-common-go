@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/datakaveri/dx-common-go/database/postgres/query"
+	"github.com/datakaveri/dx-common-go/platform/errors"
 )
 
 func TestKeysetCursorCodec(t *testing.T) {
@@ -17,11 +18,18 @@ func TestKeysetCursorCodec(t *testing.T) {
 	if out.Key != in.Key || out.ID != in.ID {
 		t.Fatalf("roundtrip = %+v, want %+v", out, in)
 	}
-	if _, err := DecodeKeysetCursor("!!not-base64!!"); err == nil {
-		t.Fatal("garbage token must error")
-	}
-	if _, err := DecodeKeysetCursor("bm90LWpzb24"); err == nil { // "not-json"
-		t.Fatal("non-JSON token must error")
+
+	// A mangled cursor is client input echoed back wrong, so it must decode to a
+	// validation error (HTTP 400 through the envelope), never a bare error that
+	// would surface as a 500 (ROADMAP P1-6).
+	for _, bad := range []string{"!!not-base64!!", "bm90LWpzb24" /* "not-json" */} {
+		_, err := DecodeKeysetCursor(bad)
+		if err == nil {
+			t.Fatalf("cursor %q must error", bad)
+		}
+		if !errors.IsValidation(err) {
+			t.Fatalf("cursor %q => %v, want a validation (400) error", bad, err)
+		}
 	}
 }
 

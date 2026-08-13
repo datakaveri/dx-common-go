@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 
 	"github.com/datakaveri/dx-common-go/database/postgres/query"
+	"github.com/datakaveri/dx-common-go/platform/errors"
 )
 
 // KeysetCursor is the resume point of a keyset (seek) page: the sort-key and
@@ -26,14 +26,20 @@ func EncodeKeysetCursor(c KeysetCursor) string {
 }
 
 // DecodeKeysetCursor parses a token produced by EncodeKeysetCursor.
+//
+// A cursor is opaque client input echoed back from a previous page, so a token
+// that fails to decode is a client error, not a server fault: the failure is
+// returned as errors.Validation (HTTP 400) with the codec error as a logged-
+// only cause. Every FindKeyset adopter inherits that mapping — a mangled
+// ?cursor= never surfaces as a 500.
 func DecodeKeysetCursor(token string) (KeysetCursor, error) {
 	var c KeysetCursor
 	b, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
-		return c, fmt.Errorf("invalid cursor: %w", err)
+		return c, errors.Validation("invalid cursor").WithCause(err)
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
-		return c, fmt.Errorf("invalid cursor: %w", err)
+		return c, errors.Validation("invalid cursor").WithCause(err)
 	}
 	return c, nil
 }
