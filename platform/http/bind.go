@@ -64,25 +64,26 @@ type Binder interface {
 }
 
 // PathValueFunc reports a path parameter's value. The router backend installs
-// one; nothing else in the platform knows which router is in use.
+// one on each request's context; nothing else in the platform knows which
+// router is in use.
 type PathValueFunc func(*http.Request, string) string
 
-// pathValue is set by the router at construction. It defaults to the stdlib
-// ServeMux accessor so a handler adapter used without the platform router
-// (in a test, say) still resolves path parameters.
-var pathValue PathValueFunc = func(r *http.Request, name string) string {
-	return r.PathValue(name)
+// pathValueKey carries the router backend's path accessor on the request
+// context.
+type pathValueKey struct{}
+
+// withPathValue returns a request whose context carries fn as its path accessor.
+// The router installs it PER REQUEST rather than in a process-global, so two
+// routers — two backends, or two tests in parallel — cannot overwrite each
+// other's accessor or race on it under -race (ROADMAP P2-5).
+func withPathValue(r *http.Request, fn PathValueFunc) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), pathValueKey{}, fn))
 }
 
-// SetPathValueFunc installs the router backend's path accessor. Called once, by
-// NewRouter, before any request is served.
-func SetPathValueFunc(f PathValueFunc) {
-	if f != nil {
-		pathValue = f
-	}
-}
-
-// PathValue reports a path parameter's value.
+// PathValue reports a path parameter's value, via the accessor the router put on
+// the request context. Absent one — a handler adapter used without the platform
+// router, in a test say — it falls back to the stdlib ServeMux accessor, so a
+// self-binding request still resolves path parameters.
 //
 // Tag binding covers this for ordinary request types; this is for a Binder,
 // which replaces tag binding wholesale and so must read its own path
@@ -90,7 +91,12 @@ func SetPathValueFunc(f PathValueFunc) {
 // /organisations/{id}/members cannot see the id at all, and the only
 // alternatives are re-parsing the URL by hand or importing the router backend
 // into the service — both of which defeat the point of hiding it.
-func PathValue(r *http.Request, name string) string { return pathValue(r, name) }
+func PathValue(r *http.Request, name string) string {
+	if fn, ok := r.Context().Value(pathValueKey{}).(PathValueFunc); ok && fn != nil {
+		return fn(r, name)
+	}
+	return r.PathValue(name)
+}
 
 // maxBodyKey carries the router's effective request-body cap on the context.
 type maxBodyKey struct{}
@@ -231,7 +237,7 @@ func bindStruct(v reflect.Value, r *http.Request) error {
 		}
 
 		if raw, ok := field.Tag.Lookup("path"); ok {
-			if err := setField(value, field.Name, pathValue(r, tagName(raw))); err != nil {
+			if err := setField(value, field.Name, PathValue(r, tagName(raw))); err != nil {
 				return err
 			}
 			continue

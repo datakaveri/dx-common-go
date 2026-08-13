@@ -124,6 +124,13 @@ type RouterSpec struct {
 	CORS *CORSConfig
 }
 
+// chiPathValue reads a chi route parameter — the platform's single point of chi
+// knowledge for path extraction. Stateless (it reads the per-request route
+// context), so one shared value serves every router.
+var chiPathValue PathValueFunc = func(req *http.Request, name string) string {
+	return chi.URLParam(req, name)
+}
+
 // NewRouter builds the standard router: the platform middleware stack, the
 // operational endpoints, then the service's routes under Base with
 // authentication applied.
@@ -142,15 +149,20 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 	}
 	r := chi.NewRouter()
 
-	// The router backend reports path parameters; nothing else in the platform
-	// knows chi is here.
-	SetPathValueFunc(func(req *http.Request, name string) string {
-		return chi.URLParam(req, name)
-	})
-
 	// Recovery FIRST, so it wraps every other middleware and every handler. A
 	// panic in a later middleware is just as fatal as one in a handler.
 	r.Use(recoverPanics(spec.Logger))
+
+	// The router backend reports path parameters, carried on each request's
+	// context rather than a process-global, so nothing else in the platform
+	// knows chi is here AND two routers never clobber each other's accessor
+	// (ROADMAP P2-5). The func only reads chi's route context, which chi has
+	// populated by the time a handler calls PathValue.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, withPathValue(req, chiPathValue))
+		})
+	})
 
 	// Then the standard stack: tracing, request id, real ip, request logging,
 	// CORS. Not optional and not opt-in — see stack.go for why the previous

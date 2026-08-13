@@ -86,15 +86,12 @@ type precedenceReq struct {
 // → header → body. It read the other way round before: the body was decoded
 // last and silently won over all three.
 func TestTaggedSourcesBeatBody(t *testing.T) {
-	SetPathValueFunc(func(*http.Request, string) string { return "from-path" })
-	t.Cleanup(func() {
-		SetPathValueFunc(func(r *http.Request, name string) string { return r.PathValue(name) })
-	})
-
 	r := httptest.NewRequest("POST", "/x?kind=from-query&page=2&size=5",
 		strings.NewReader(`{"thing":"from-body","kind":"from-body","trace":"from-body","page":99}`))
 	r.Header.Set("X-Trace", "from-header")
 	r = r.WithContext(identity.With(r.Context(), identity.Subject{ID: "u-1"}))
+	// The accessor rides the request context now, not a process-global.
+	r = withPathValue(r, func(*http.Request, string) string { return "from-path" })
 
 	got, err := bind[precedenceReq](r)
 	if err != nil {
