@@ -252,6 +252,10 @@ func (r *ConsumerRunner) dispatch(ctx context.Context, d Delivery, handler Handl
 		outcome = DeadLetter
 	}
 
+	// Record the final outcome, so a dead-letter is observable (ROADMAP P1-14)
+	// without polling queue depth.
+	deliveriesTotal.WithLabelValues(r.cfg.Queue, outcomeLabel(outcome)).Inc()
+
 	switch outcome {
 	case Ack:
 		if err := d.Ack(false); err != nil {
