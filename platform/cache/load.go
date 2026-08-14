@@ -3,8 +3,9 @@ package cache
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // GetOrLoad is cache-aside: return the cached value, or load it, store it and
@@ -21,7 +22,11 @@ import (
 //     by 500 requests calls load ONCE; the rest wait for that result. Without
 //     this, expiry of a hot key sends every in-flight request to the database
 //     at the same instant — the cache stampede, and the reason a cache can
-//     make an outage worse rather than better.
+//     make an outage worse rather than better. Collapse is scoped to the cache
+//     ROOT: sibling scopes share it, two independent caches never do.
+//   - **A cancelled waiter returns.** A caller whose context is cancelled while
+//     waiting on another caller's in-flight load returns its context error
+//     rather than blocking; the load still completes for the callers left.
 //   - **A load error is never cached.** The next caller retries. Caching a
 //     failure turns a transient database blip into a sustained outage for the
 //     length of the TTL.
@@ -37,8 +42,6 @@ import (
 //	    return repo.FindUser(ctx, id)
 //	})
 func GetOrLoad[T any](ctx context.Context, s Scope, key string, load func(context.Context) (T, error)) (T, error) {
-	var zero T
-
 	var out T
 	err := s.Get(ctx, key, &out)
 	switch {
@@ -51,7 +54,7 @@ func GetOrLoad[T any](ctx context.Context, s Scope, key string, load func(contex
 	}
 
 	full := s.Key(key)
-	v, err, _ := loaders.Do(full, func() (any, error) {
+	ch := groupOf(s).DoChan(full, func() (any, error) {
 		loaded, lerr := load(ctx)
 		if lerr != nil {
 			return nil, lerr
@@ -59,18 +62,31 @@ func GetOrLoad[T any](ctx context.Context, s Scope, key string, load func(contex
 		_ = s.Set(ctx, key, loaded) // see the note on write failures above
 		return loaded, nil
 	})
-	if err != nil {
-		return zero, err
-	}
+	return waitTyped[T](ctx, ch, full)
+}
 
-	typed, ok := v.(T)
-	if !ok {
-		// Only reachable if two call sites share a key with different types,
-		// which is a programming error worth surfacing rather than papering
-		// over with a zero value.
-		return zero, errors.New("cache: concurrent load returned a different type for key " + full)
+// waitTyped waits on a singleflight result while honouring ctx: a cancelled
+// waiter returns ctx.Err() rather than blocking on a load another caller
+// started (ROADMAP P2-1). The load itself is never cancelled here — it completes
+// and populates the cache for the callers still waiting.
+func waitTyped[T any](ctx context.Context, ch <-chan singleflight.Result, full string) (T, error) {
+	var zero T
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return zero, r.Err
+		}
+		typed, ok := r.Val.(T)
+		if !ok {
+			// Only reachable if two call sites share a key with different types,
+			// a programming error worth surfacing rather than papering over with
+			// a zero value.
+			return zero, errors.New("cache: concurrent load returned a different type for key " + full)
+		}
+		return typed, nil
 	}
-	return typed, nil
 }
 
 // Invalidating writes through: it runs the mutation, then drops the key.
@@ -90,67 +106,26 @@ func Invalidating(ctx context.Context, s Scope, key string, fn func(context.Cont
 	return err
 }
 
-// loaders collapses concurrent loads. It is package-level state, which the
-// platform otherwise forbids — justified because it holds no configuration and
-// no connection, only in-flight call bookkeeping keyed by fully-qualified cache
-// key. Per-Cache instances would not collapse loads across two scopes derived
-// from the same root, which is the common case.
-var loaders singleflight
-
-// singleflight deduplicates concurrent calls sharing a key.
-//
-// Implemented here rather than taking golang.org/x/sync/singleflight: it is
-// ~30 lines, and platform/cache is L3 — a dependency added at this layer is
-// inherited by every service in the fleet, so the bar for adding one is high.
-type singleflight struct {
-	mu sync.Mutex
-	m  map[string]*call
-}
-
-type call struct {
-	wg  sync.WaitGroup
-	val any
-	err error
-}
-
-// Do runs fn unless a call for key is already in flight, in which case it waits
-// and returns that call's result. shared reports whether the result came from
-// another caller's execution.
-func (g *singleflight) Do(key string, fn func() (any, error)) (v any, err error, shared bool) {
-	g.mu.Lock()
-	if g.m == nil {
-		g.m = make(map[string]*call)
+// groupOf returns the per-root singleflight group carried by s. Every scope from
+// one root shares it (so sibling scopes collapse a shared load) and two roots
+// never do (so independent caches cannot hand each other an in-flight value —
+// ROADMAP P2-1). A Scope not produced by New is not expected; if one appears it
+// gets a throwaway group — correct, just without cross-call collapse.
+func groupOf(s Scope) *singleflight.Group {
+	if sc, ok := s.(*scope); ok && sc.loaders != nil {
+		return sc.loaders
 	}
-	if c, ok := g.m[key]; ok {
-		g.mu.Unlock()
-		c.wg.Wait()
-		return c.val, c.err, true
-	}
-	c := new(call)
-	c.wg.Add(1)
-	g.m[key] = c
-	g.mu.Unlock()
-
-	// Recover so a panicking loader does not leave every waiter blocked on a
-	// WaitGroup that is never released.
-	defer func() {
-		if r := recover(); r != nil {
-			c.err = errors.New("cache: loader panicked")
-			g.finish(key, c)
-			panic(r)
-		}
-	}()
-
-	c.val, c.err = fn()
-	g.finish(key, c)
-	return c.val, c.err, false
+	return &singleflight.Group{}
 }
 
-func (g *singleflight) finish(key string, c *call) {
-	g.mu.Lock()
-	delete(g.m, key)
-	g.mu.Unlock()
-	c.wg.Done()
+// runRefresh runs fn on s's refresh executor so it drains at Close, or as a bare
+// goroutine when s is not a scope produced by New.
+func runRefresh(s Scope, fn func()) {
+	if sc, ok := s.(*scope); ok && sc.refresh != nil {
+		sc.refresh.run(fn)
+		return
+	}
+	go fn()
 }
 
 // GetOrLoadAhead is GetOrLoad with refresh-ahead: a value older than refreshAfter
@@ -167,7 +142,8 @@ func (g *singleflight) finish(key string, c *call) {
 // The background reload uses a context DETACHED from the caller's, because the
 // request that triggered it returns immediately — an inherited context would be
 // cancelled the moment the response is written, so the refresh would never
-// complete and every subsequent request would trigger another.
+// complete and every subsequent request would trigger another. It is owned by
+// the Cache's refresher, so it drains at Close rather than leaking (ROADMAP P2-1).
 func GetOrLoadAhead[T any](
 	ctx context.Context,
 	s Scope,
@@ -179,24 +155,26 @@ func GetOrLoadAhead[T any](
 	err := s.Get(ctx, key, &env)
 	if err == nil {
 		if time.Since(env.At) > refreshAfter {
-			// Detached, and deduplicated by singleflight, so a hot key
-			// under refresh does not spawn one goroutine per request.
-			go func() {
+			// Detached, deduplicated by singleflight, and owned by the refresher
+			// so a hot key under refresh neither spawns one goroutine per request
+			// nor leaves goroutines running past shutdown.
+			runRefresh(s, func() {
 				bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 				defer cancel()
-				_, _, _ = loaders.Do(s.Key(key)+"\x00refresh", func() (any, error) {
+				_, _, _ = groupOf(s).Do(s.Key(key)+"\x00refresh", func() (any, error) {
 					v, lerr := load(bg)
 					if lerr == nil {
 						_ = s.Set(bg, key, envelope[T]{Value: v, At: time.Now()})
 					}
 					return nil, lerr
 				})
-			}()
+			})
 		}
 		return env.Value, nil
 	}
 
-	v, err, _ := loaders.Do(s.Key(key), func() (any, error) {
+	full := s.Key(key)
+	ch := groupOf(s).DoChan(full, func() (any, error) {
 		loaded, lerr := load(ctx)
 		if lerr != nil {
 			return nil, lerr
@@ -204,16 +182,7 @@ func GetOrLoadAhead[T any](
 		_ = s.Set(ctx, key, envelope[T]{Value: loaded, At: time.Now()})
 		return loaded, nil
 	})
-	if err != nil {
-		var zero T
-		return zero, err
-	}
-	typed, ok := v.(T)
-	if !ok {
-		var zero T
-		return zero, errors.New("cache: concurrent load returned a different type for key " + s.Key(key))
-	}
-	return typed, nil
+	return waitTyped[T](ctx, ch, full)
 }
 
 // refreshTimeout bounds a background reload. Without it a wedged loader leaks a

@@ -32,6 +32,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrMiss reports that a key is absent or expired.
@@ -133,7 +135,7 @@ type Store interface {
 
 // New builds a Cache over a Store.
 func New(s Store, opts ...Option) Cache {
-	c := &scope{store: s}
+	c := &scope{store: s, loaders: &singleflight.Group{}, refresh: &refresher{}}
 	for _, o := range opts {
 		o(c)
 	}
@@ -152,10 +154,18 @@ func WithPrefix(p string) Option { return func(s *scope) { s.prefix = p } }
 
 // scope implements both Cache and Scope. One type serves both because the root
 // IS a scope — a separate root type would duplicate every method to no benefit.
+//
+// loaders and refresh are POINTERS created once in New and carried by value into
+// every derived scope (Namespace/TTL copy the struct), so all scopes from one
+// root share them while two independent roots each get their own. That is what
+// makes concurrent-load collapse span sibling scopes yet never cross between two
+// unrelated caches (ROADMAP P2-1).
 type scope struct {
-	store  Store
-	prefix string
-	ttl    time.Duration
+	store   Store
+	prefix  string
+	ttl     time.Duration
+	loaders *singleflight.Group
+	refresh *refresher
 }
 
 func (s *scope) Namespace(name string) Scope {
@@ -282,7 +292,15 @@ func (s *scope) Allow(ctx context.Context, key string, limit int, window time.Du
 	return int(n) <= limit, remaining, nil
 }
 
-func (s *scope) Close() error { return s.store.Close() }
+// Close drains the background refresh-ahead tasks (bounded by refreshTimeout so a
+// wedged loader cannot hang shutdown) before closing the store, so no refresh
+// goroutine outlives the Cache (ROADMAP P2-1).
+func (s *scope) Close() error {
+	if s.refresh != nil {
+		s.refresh.drain(refreshTimeout)
+	}
+	return s.store.Close()
+}
 
 func joinKey(parts ...string) string {
 	out := make([]string, 0, len(parts))
