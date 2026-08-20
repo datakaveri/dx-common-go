@@ -18,7 +18,14 @@ const (
 // GatewayLogConsumer and persisted to gateway_access_log. Field names match
 // the Java entity / table columns.
 type GatewayEvent struct {
-	RequestID   string          `json:"request_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	// TraceID is the W3C trace id of the request, when tracing is active, so an
+	// audited security outcome joins the distributed trace and the diagnostic
+	// logs on one key. omitempty + a Vert.x consumer (which ignores unknown JSON
+	// fields) makes this additive: the controlplane persists it once its
+	// gateway_access_log entity/table gains a trace_id column, and ignores it
+	// harmlessly until then.
+	TraceID     string          `json:"trace_id,omitempty"`
 	Event       string          `json:"event"`
 	UserID      string          `json:"user_id,omitempty"` // UUID when known
 	Method      string          `json:"method,omitempty"`

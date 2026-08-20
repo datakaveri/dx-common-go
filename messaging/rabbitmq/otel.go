@@ -58,9 +58,11 @@ func injectTraceContext(ctx context.Context, headers amqp.Table) {
 
 // startProducerSpan begins a PRODUCER span for a publish and returns a context
 // carrying it — inject the returned context's trace state into the message
-// headers so the span is what a consumer links to.
-func startProducerSpan(ctx context.Context, exchange, routingKey string) (context.Context, trace.Span) {
-	return otel.Tracer(tracerName).Start(ctx, "rabbitmq.publish "+routingKey,
+// headers so the span is what a consumer links to. extra carries caller options
+// such as trace.WithNewRoot / trace.WithLinks, which a DLQ replay uses to start
+// a fresh trace linked back to the original message.
+func startProducerSpan(ctx context.Context, exchange, routingKey string, extra ...trace.SpanStartOption) (context.Context, trace.Span) {
+	opts := []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
 			semconv.MessagingSystemRabbitmq,
@@ -68,7 +70,18 @@ func startProducerSpan(ctx context.Context, exchange, routingKey string) (contex
 			semconv.MessagingDestinationName(exchange),
 			semconv.MessagingRabbitmqDestinationRoutingKey(routingKey),
 		),
-	)
+	}
+	opts = append(opts, extra...)
+	return otel.Tracer(tracerName).Start(ctx, "rabbitmq.publish "+routingKey, opts...)
+}
+
+// ExtractDeliveryContext returns ctx carrying the trace context the publisher
+// stamped onto d's headers. A DLQ replay tool uses it to LINK a new replay
+// trace back to the message's original trace (via trace.LinkFromContext); a
+// bespoke consumer could use it to CONTINUE that trace. It returns ctx
+// unchanged until a propagator is set (observability.Init).
+func ExtractDeliveryContext(ctx context.Context, d amqp.Delivery) context.Context {
+	return otel.GetTextMapPropagator().Extract(ctx, amqpHeaderCarrier(d.Headers))
 }
 
 // startConsumerSpan extracts any trace context stamped on d by the publisher
@@ -99,4 +112,18 @@ func recordSpanError(span trace.Span, err error) {
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
+}
+
+// recordConsumerOutcome stamps the final delivery decision on the consumer span:
+// a bounded dx.mq.outcome attribute on every path, and ERROR status for the
+// non-Ack outcomes. The status is what lets the Collector's error tail-sampling
+// policy retain a poison (DeadLetter) or failed-and-requeued trace — the handler
+// collapses its error into an Outcome, so the runner has no error object to
+// RecordError here, only the decision (review P1-3).
+func recordConsumerOutcome(span trace.Span, outcome Outcome) {
+	label := outcomeLabel(outcome)
+	span.SetAttributes(attribute.String("dx.mq.outcome", label))
+	if outcome != Ack {
+		span.SetStatus(codes.Error, label)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,7 +58,13 @@ func Open(ctx context.Context, cfg Config, opts ...Option) (DB, error) {
 	// repository abstraction — that is the locked platform rule, and it is why
 	// repository interceptor chains were rejected. A tracer here sees every
 	// query, including raw SQL and sqlc-generated code.
-	tracers := o.tracers
+	// otelpgx creates a span per query at the driver seam — the fleet-wide DB
+	// tracing the composition root cannot install by itself (Init only sets the
+	// global provider). Prepended so it is always present; it records the
+	// parameterized statement but NOT argument values (privacy — S13.2), and is
+	// a no-op until observability.Init runs. Service tracers and the slow-query
+	// logger append after it.
+	tracers := append([]pgx.QueryTracer{otelpgx.NewTracer()}, o.tracers...)
 	if cfg.SlowQueryThreshold > 0 {
 		tracers = append(tracers, &slowQueryTracer{
 			threshold: cfg.SlowQueryThreshold,

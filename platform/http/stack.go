@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 
+	"github.com/datakaveri/dx-common-go/logging"
 	"github.com/datakaveri/dx-common-go/transport/clientip"
 )
 
@@ -92,6 +93,10 @@ func globalStack(log *zap.Logger, cors CORSConfig) []func(http.Handler) http.Han
 		// Tracing outermost of the observability group, so the span covers the
 		// whole request including the time spent in the rest of the stack.
 		otelhttp.NewMiddleware("http.server"),
+		// RED metrics next, so the measured duration matches the span's and
+		// covers everything below. Bounded labels only (route template, status
+		// class) — see redMetrics.
+		redMetrics,
 		requestID,
 		// Capture BEFORE RealIP, and the order is load-bearing. RealIP
 		// overwrites RemoteAddr with a value taken from a client-supplied
@@ -101,6 +106,13 @@ func globalStack(log *zap.Logger, cors CORSConfig) []func(http.Handler) http.Han
 		// trustworthy to fall back to. Swap these two and transport/clientip's
 		// fallback silently becomes attacker-controlled (ROADMAP P1-4).
 		clientip.Capture,
+		// A request-scoped logger, bound to the request id and trace/span ids,
+		// stamped onto the context so a handler logging via logging.From(ctx)
+		// gets a line that joins the request and its trace without threading a
+		// logger through every signature. After tracing and requestID above so
+		// both ids are present; before requestLogger so its own line is not the
+		// only correlated one.
+		contextLogger(log),
 		// RealIP rewrites RemoteAddr from X-Forwarded-For / X-Real-IP. Every
 		// service here sits behind the gateway, so without it the request log
 		// records the gateway's address for every caller.
@@ -131,12 +143,38 @@ type requestIDKey struct{}
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(RequestIDHeader)
-		if id == "" {
+		if !validRequestID(id) {
 			id = uuid.NewString()
 		}
 		w.Header().Set(RequestIDHeader, id)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
 	})
+}
+
+// maxRequestIDLen bounds a client-supplied correlation id — generous for any
+// real id (a UUID is 36), small enough that an oversized header cannot bloat
+// every log line and index entry the id lands in.
+const maxRequestIDLen = 128
+
+// validRequestID reports whether a client-supplied X-Request-ID is safe to
+// honour: non-empty, within the length bound, URL-safe identifier characters
+// only. An invalid one is replaced with a generated id rather than propagated —
+// it is echoed to clients and stamped onto logs, traces and downstream
+// requests, so honouring an arbitrary one is a log-injection and cardinality
+// vector (GW-3).
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // RequestIDFrom returns the correlation id for this request, or "" outside the
@@ -159,7 +197,7 @@ func requestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(rec, r)
 
-			log.Info("request",
+			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Int("status", rec.status),
@@ -167,7 +205,28 @@ func requestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 				zap.Int("bytes", rec.bytes),
 				zap.String("request_id", RequestIDFrom(r.Context())),
 				zap.String("remote_addr", r.RemoteAddr),
-			)
+			}
+			// trace_id/span_id join this line to the trace. Appended, not in the
+			// literal above, because they are absent when tracing is off and a
+			// nil-valued field pair would be noise on every line. No personal
+			// identity here: diagnostic access logs carry correlation ids and
+			// bounded request facts only — identity belongs in audit events
+			// (S13.2 / review P0-5).
+			log.Info("request", append(fields, logging.TraceFields(r.Context())...)...)
+		})
+	}
+}
+
+// contextLogger stamps a request-scoped logger onto the context, bound to the
+// request id and the trace/span ids, so a handler that logs via
+// logging.From(ctx) produces a line already joined to the request and its
+// trace. It deliberately carries NO user identity — see requestLogger.
+func contextLogger(base *zap.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			fields := append([]zap.Field{zap.String("request_id", RequestIDFrom(ctx))}, logging.TraceFields(ctx)...)
+			next.ServeHTTP(w, r.WithContext(logging.Into(ctx, base.With(fields...))))
 		})
 	}
 }

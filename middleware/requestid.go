@@ -16,7 +16,7 @@ func RequestID() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := r.Header.Get("X-Request-ID")
-			if id == "" {
+			if !validRequestID(id) {
 				id = uuid.NewString()
 			}
 			w.Header().Set("X-Request-ID", id)
@@ -24,6 +24,32 @@ func RequestID() func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// maxRequestIDLen bounds a client-supplied correlation id. It is generous for
+// any real id (a UUID is 36) and small enough that an oversized header cannot be
+// used to bloat every log line and index entry the id lands in.
+const maxRequestIDLen = 128
+
+// validRequestID reports whether a client-supplied X-Request-ID is safe to honour:
+// non-empty, within the length bound, and URL-safe identifier characters only.
+// An invalid one is replaced with a generated id rather than propagated — the
+// value is echoed to clients and stamped onto logs, traces and downstream
+// requests, so an unvalidated one is a log-injection and cardinality vector
+// (review §6 Security / GW-3).
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // RequestIDFromCtx retrieves the request ID stored by the RequestID middleware.

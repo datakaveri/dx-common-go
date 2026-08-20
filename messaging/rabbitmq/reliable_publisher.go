@@ -9,6 +9,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -68,6 +69,13 @@ type PublishOptions struct {
 	// corrupting trace propagation to carry an application value would be a
 	// silent observability outage.
 	Headers map[string]any
+	// NewRoot starts the producer span as a fresh trace root rather than a child
+	// of any span on ctx. A DLQ replay uses it so re-publishing a days-old
+	// message does not reopen a days-old trace (review P1-2).
+	NewRoot bool
+	// Links attaches span links to the producer span — a DLQ replay links the
+	// republish back to the original message's trace (from ExtractDeliveryContext).
+	Links []trace.Link
 }
 
 // Publish sends body to exchange/routingKey, redialing and retrying once if
@@ -76,7 +84,14 @@ type PublishOptions struct {
 // message so a consumer can continue the trace (a no-op until observability.Init
 // configures a TracerProvider and propagator).
 func (p *ReliablePublisher) Publish(ctx context.Context, exchange, routingKey string, body []byte, opts PublishOptions) error {
-	ctx, span := startProducerSpan(ctx, exchange, routingKey)
+	var spanOpts []trace.SpanStartOption
+	if opts.NewRoot {
+		spanOpts = append(spanOpts, trace.WithNewRoot())
+	}
+	if len(opts.Links) > 0 {
+		spanOpts = append(spanOpts, trace.WithLinks(opts.Links...))
+	}
+	ctx, span := startProducerSpan(ctx, exchange, routingKey, spanOpts...)
 	defer span.End()
 
 	headers := amqp.Table{}
@@ -119,17 +134,30 @@ func (p *ReliablePublisher) publishWithRetry(ctx context.Context, exchange, rout
 	return nil
 }
 
-// PublishJSON marshals v and publishes it (background context). It implements
-// the notify/email.Publisher interface so the email notifier can share this
-// publisher's connection.
-func (p *ReliablePublisher) PublishJSON(exchange, routingKey string, v any) error {
+// PublishJSONCtx marshals v and publishes it under ctx, so the producer span
+// links to the initiating operation's trace and the publish honours that
+// operation's deadline and cancellation. Prefer it wherever a request or
+// consumer context is in hand (review P1-1).
+func (p *ReliablePublisher) PublishJSONCtx(ctx context.Context, exchange, routingKey string, v any) error {
 	body, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: marshal: %w", err)
 	}
+	return p.Publish(ctx, exchange, routingKey, body, PublishOptions{})
+}
+
+// PublishJSON marshals v and publishes it under a fresh background context with
+// a 5s timeout. It implements the notify/email.Publisher interface so the email
+// notifier can share this publisher's connection.
+//
+// A caller that holds a request or consumer context should use PublishJSONCtx
+// instead: this context-free form detaches the publish from the initiating
+// trace, so its producer span starts a new root rather than continuing the work
+// that triggered it (review P1-1).
+func (p *ReliablePublisher) PublishJSON(exchange, routingKey string, v any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return p.Publish(ctx, exchange, routingKey, body, PublishOptions{})
+	return p.PublishJSONCtx(ctx, exchange, routingKey, v)
 }
 
 func (p *ReliablePublisher) publishOnce(ctx context.Context, exchange, routingKey string, pub amqp.Publishing) error {

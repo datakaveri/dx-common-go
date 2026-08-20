@@ -156,6 +156,10 @@ type Base struct {
 	// values (the AD-015 / H-01 trap).
 	GRPC    GRPC    `mapstructure:"grpc"`
 	OpenAPI OpenAPI `mapstructure:"openapi"`
+	// Observability is the OpenTelemetry SDK configuration bootstrap hands to
+	// observability.Init. Every field is a leaf value — this package is L0 and
+	// owns the values, while observability owns the behaviour.
+	Observability Observability `mapstructure:"observability"`
 }
 
 // Configurer is implemented by any config that embeds Base, so bootstrap can
@@ -213,6 +217,31 @@ type OpenAPI struct {
 	SwaggerUIPath     string `mapstructure:"swagger_ui_path"`
 	ValidateRequests  bool   `mapstructure:"validate_requests"`
 	ValidateResponses bool   `mapstructure:"validate_responses"`
+}
+
+// Observability configures the OpenTelemetry SDK. The zero value is the
+// production-safe no-op: an empty endpoint means bootstrap initializes no SDK
+// (mirroring the config-only enablement of the persistence mode, AD-012), so a
+// service in an environment with no collector pays nothing.
+//
+// Env vars follow the unprefixed `.`→`_` convention (AD-010):
+// OBSERVABILITY_OTLP_ENDPOINT, OBSERVABILITY_ENVIRONMENT, OBSERVABILITY_SAMPLE_RATIO,
+// OBSERVABILITY_SECURE. The standard OTEL_EXPORTER_OTLP_ENDPOINT is also honoured
+// by observability.Init when OTLPEndpoint is empty.
+type Observability struct {
+	// OTLPEndpoint is the OTLP/gRPC collector address (host:port). Empty ⇒
+	// observability.Init reads OTEL_EXPORTER_OTLP_ENDPOINT, and if that is also
+	// empty, no SDK is built.
+	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+	// Environment becomes deployment.environment.name on every span/log.
+	Environment string `mapstructure:"environment"`
+	// SampleRatio is the head-sampling probability. 0 (the default) records
+	// every trace so the Collector tail can retain all errors; a value in
+	// (0,1) enables ParentBased ratio sampling. See observability.Config.
+	SampleRatio float64 `mapstructure:"sample_ratio"`
+	// Secure selects TLS for the OTLP exporter; false keeps the node-local
+	// insecure transport.
+	Secure bool `mapstructure:"secure"`
 }
 
 // PlatformDefaults are the defaults every service shares. Load merges them
@@ -285,6 +314,15 @@ func PlatformDefaults() map[string]any {
 		// per-request cost and its failures surface as 500s to clients rather
 		// than as the spec bug they actually are. Turn it on in dev and CI.
 		"openapi.validate_responses": false,
+		// Observability. Declared with empty/zero values so the keys exist in
+		// AllKeys and therefore bind from the environment (the AD-015 rule): a
+		// value supplied only through OBSERVABILITY_* would otherwise silently
+		// bind to nothing. Empty endpoint = no SDK, so declaring these changes
+		// nothing until a service's environment sets an endpoint.
+		"observability.otlp_endpoint": "",
+		"observability.environment":   "",
+		"observability.sample_ratio":  0.0,
+		"observability.secure":        false,
 	}
 }
 

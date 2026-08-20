@@ -253,8 +253,10 @@ func (r *ConsumerRunner) dispatch(ctx context.Context, d Delivery, handler Handl
 	}
 
 	// Record the final outcome, so a dead-letter is observable (ROADMAP P1-14)
-	// without polling queue depth.
+	// without polling queue depth, and stamp it onto the consumer span so a
+	// poison/requeue trace carries ERROR status for tail sampling (review P1-3).
 	deliveriesTotal.WithLabelValues(r.cfg.Queue, outcomeLabel(outcome)).Inc()
+	recordConsumerOutcome(span, outcome)
 
 	switch outcome {
 	case Ack:

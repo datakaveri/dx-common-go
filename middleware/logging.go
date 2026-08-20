@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/datakaveri/dx-common-go/logging"
 )
 
 // responseWriter is a minimal wrapper that captures the status code written by
@@ -36,7 +38,7 @@ func Logger(logger *zap.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(rw, r)
 
-			logger.Info("request",
+			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Int("status", rw.status),
@@ -44,7 +46,11 @@ func Logger(logger *zap.Logger) func(http.Handler) http.Handler {
 				zap.Int("bytes", rw.bytes),
 				zap.String("request_id", RequestIDFromCtx(r.Context())),
 				zap.String("remote_addr", r.RemoteAddr),
-			)
+			}
+			// trace_id/span_id join this line to the trace; appended so they are
+			// absent (not empty) when tracing is off. No personal identity here
+			// (S13.2 / review P0-5).
+			logger.Info("request", append(fields, logging.TraceFields(r.Context())...)...)
 		})
 	}
 }

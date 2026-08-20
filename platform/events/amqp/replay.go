@@ -7,6 +7,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	dxmq "github.com/datakaveri/dx-common-go/messaging/rabbitmq"
@@ -271,12 +272,22 @@ func (b *Bus) ReplayQueue(ctx context.Context, dlq string, opts ReplayOptions) (
 			continue
 		}
 
+		// A replay is a NEW operation, not a continuation: start a fresh trace
+		// (NewRoot) so re-publishing a days-old message does not reopen a
+		// days-old trace, and LINK it to the original producer context carried on
+		// the DLQ headers, so an operator can still navigate between them (review
+		// P1-2). The republished message carries the REPLAY trace, so its
+		// consumers continue that rather than the original.
+		origCtx := dxmq.ExtractDeliveryContext(ctx, d)
+
 		// Publish FIRST, with confirms, and acknowledge only once the broker
 		// has it. The reverse order loses the message on a failed publish —
 		// which is the one outcome a replay tool must never produce.
 		if perr := b.pub.Publish(ctx, b.exchange, key, msg.Body, dxmq.PublishOptions{
 			MessageID: msg.MessageID,
 			Headers:   map[string]any{replayHeader: msg.Replays + 1},
+			NewRoot:   true,
+			Links:     []trace.Link{trace.LinkFromContext(origCtx)},
 		}); perr != nil {
 			_ = d.Nack(false, true)
 			return res, fmt.Errorf("amqp: replay publish %s: %w", msg.MessageID, perr)

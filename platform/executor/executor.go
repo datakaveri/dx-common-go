@@ -89,6 +89,26 @@ func New(log *zap.Logger) *Executor {
 // name appears in logs and is the only thing identifying a task that panics or
 // outstays the drain, so make it say which work it is.
 func (e *Executor) Go(name string, fn func(context.Context)) error {
+	return e.spawn(name, fn)
+}
+
+// GoLinked is Go for work started DURING a request that should stay navigable
+// from it — an agent plan loop, a long export. reqCtx is the INITIATING
+// request's context: the task still runs on the executor's lifecycle context
+// (cancelled at Shutdown, NOT when the request ends), but under a new-root span
+// LINKED to the request's span, so the detached work is a trace an operator can
+// reach from the request that started it. Prefer it over Go wherever a request
+// context is in hand.
+func (e *Executor) GoLinked(reqCtx context.Context, name string, fn func(context.Context)) error {
+	return e.spawn(name, func(taskCtx context.Context) {
+		taskCtx, span := startTaskSpan(taskCtx, reqCtx, name)
+		defer span.End()
+		fn(taskCtx)
+	})
+}
+
+// spawn owns the goroutine lifecycle shared by Go and GoLinked.
+func (e *Executor) spawn(name string, fn func(context.Context)) error {
 	e.mu.Lock()
 	if e.draining {
 		e.mu.Unlock()

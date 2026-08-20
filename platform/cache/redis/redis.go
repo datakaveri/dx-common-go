@@ -16,8 +16,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/redis/go-redis/extra/redisotel/v9"
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/datakaveri/dx-common-go/platform/cache"
@@ -59,6 +61,14 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	})
+	// Instrument at the one seam that creates the client (NewStore wraps a
+	// caller-owned client and leaves its instrumentation to the caller, so a
+	// second hook is not stacked). No-op until observability.Init sets a
+	// provider.
+	if err := redisotel.InstrumentTracing(c); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("redis: instrument tracing: %w", err)
+	}
 	if err := c.Ping(ctx).Err(); err != nil {
 		_ = c.Close()
 		return nil, err

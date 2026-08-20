@@ -32,6 +32,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/datakaveri/dx-common-go/observability"
 	"github.com/datakaveri/dx-common-go/platform/config"
 	dxsql "github.com/datakaveri/dx-common-go/platform/database/sql"
 	"github.com/datakaveri/dx-common-go/platform/observability/health"
@@ -320,6 +321,30 @@ func run[C config.Configurer](spec Spec[C]) error {
 		Cfg: cfg, Log: log, Name: spec.Name, Version: spec.Version,
 		Health: health.New(),
 	}
+
+	// 3a. Observability. After the logger so a failure is logged, and before
+	//     migrations/Wire so every driver seam Wire builds reads a live
+	//     TracerProvider. Telemetry is availability-safe (OBSERVABILITY.md
+	//     principle 3): an init failure is a WARNING, never a boot failure — a
+	//     service must serve even when its collector is misconfigured. The
+	//     empty-endpoint case builds no SDK at all.
+	//
+	//     Registered as the FIRST closer so it runs LAST (LIFO) and can flush
+	//     spans emitted while the other closers ran. It shares the shutdown
+	//     budget with them; a reserved telemetry flush budget is tracked
+	//     separately (OBSERVABILITY_PLAN review P1-11).
+	otelShutdown, oerr := observability.Init(ctx, observability.Config{
+		ServiceName: spec.Name,
+		Version:     spec.Version,
+		Environment: base.Observability.Environment,
+		Endpoint:    base.Observability.OTLPEndpoint,
+		SampleRatio: base.Observability.SampleRatio,
+		Secure:      base.Observability.Secure,
+	})
+	if oerr != nil {
+		log.Warn("observability init failed; continuing without tracing", zap.Error(oerr))
+	}
+	app.Closer("observability", otelShutdown)
 
 	var deps Deps
 	if spec.Deps != nil {

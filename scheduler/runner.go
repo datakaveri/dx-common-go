@@ -143,9 +143,15 @@ func (r *Runner) runOnce(ctx context.Context, rj *registeredJob) {
 		defer unlock()
 	}
 
+	// One span per run (new root — a tick has no inbound trace), so a job's work
+	// and any dependency spans it creates are a navigable trace, and a failure
+	// is a failed trace. Started AFTER the singleton lock so a skipped tick
+	// produces no span.
+	spanCtx, span := startJobSpan(runCtx, rj.job.Name)
 	start := time.Now()
-	err := runProtected(runCtx, rj.job)
+	err := runProtected(spanCtx, rj.job)
 	duration := time.Since(start)
+	endJobSpan(span, err)
 
 	runsTotal.WithLabelValues(rj.job.Name).Inc()
 	durationSeconds.WithLabelValues(rj.job.Name).Observe(duration.Seconds())

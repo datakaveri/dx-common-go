@@ -23,6 +23,7 @@ import (
 	"net"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -127,6 +128,11 @@ func New(cfg Config, opts Options, register ...Registrar) (*Server, error) {
 
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecv),
+		// otelgrpc as a StatsHandler continues the caller's trace onto the
+		// incoming RPC (the mirror of grpc/client's NewClientHandler). It is
+		// separate from the interceptor chain, so the fixed security-interceptor
+		// order above is untouched. No-op until observability.Init runs.
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.ChainUnaryInterceptor(chain...),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			MaxConnectionIdle: 5 * time.Minute,
