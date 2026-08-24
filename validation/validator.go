@@ -69,7 +69,7 @@ func (v *Validator) String(field string, value string, opts ...StringOption) *Va
 		}
 	}
 
-	if cfg.OneOf != nil && len(cfg.OneOf) > 0 {
+	if len(cfg.OneOf) > 0 {
 		found := false
 		for _, allowed := range cfg.OneOf {
 			if value == allowed {

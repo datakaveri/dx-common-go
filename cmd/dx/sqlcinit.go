@@ -68,7 +68,7 @@ func cmdSqlcInit(args []string) error {
 	}
 	gitkeep := filepath.Join("db", "sqlc", "queries", ".gitkeep")
 	if _, err := os.Stat(gitkeep); os.IsNotExist(err) {
-		if err := os.WriteFile(gitkeep, nil, 0o644); err != nil {
+		if err := os.WriteFile(gitkeep, nil, 0o644); err != nil { //nolint:gosec // G306: a committed .gitkeep placeholder; 0644 is correct
 			return fmt.Errorf("create %s: %w", gitkeep, err)
 		}
 	}

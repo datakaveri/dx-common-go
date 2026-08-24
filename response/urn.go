@@ -22,7 +22,7 @@ const (
 	URNAsConflict     = "urn:dx:as:ResourceAlreadyExists"
 	URNAsInternal     = "urn:dx:as:InternalServerError"
 	URNAsInvalidParam = "urn:dx:as:InvalidParamValue"
-	URNAsTokenExpired = "urn:dx:as:TokenExpired"
+	URNAsTokenExpired = "urn:dx:as:TokenExpired" //nolint:gosec // G101 false positive: a response URN constant, not a credential
 )
 
 // URN constants for the catalogue service namespace.

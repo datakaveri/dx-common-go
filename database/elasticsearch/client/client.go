@@ -225,8 +225,7 @@ func (c *Client) DoNDJSON(ctx context.Context, path, body string) (json.RawMessa
 // higher packages to turn a 404 into "exists = false" without re-importing the
 // error taxonomy's internals.
 func IsNotFound(err error) bool {
-	var dxe dxerrors.DxError
-	return errors.As(err, &dxe) && dxe.Code() == dxerrors.ErrNotFound
+	return dxerrors.IsNotFoundError(err)
 }
 
 func extractESError(payload []byte) string {

@@ -43,8 +43,15 @@ func ValidateMultipartUpload(cfg UploadConfig) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Bound the whole request body before parsing. cfg.MaxMemory only
+			// caps the in-memory portion (the rest spills to temp files), so
+			// without this a large body is still fully consumed. MaxFileSize is
+			// the per-file ceiling; use it as the total-body ceiling here so a
+			// single oversized upload is rejected before it is buffered.
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxFileSize)
+
 			// Parse multipart form with size limits
-			if err := r.ParseMultipartForm(cfg.MaxMemory); err != nil {
+			if err := r.ParseMultipartForm(cfg.MaxMemory); err != nil { //nolint:gosec // G120: r.Body is bounded by the MaxBytesReader installed just above
 				dxerrors.WriteError(w, dxerrors.NewValidation("failed to parse multipart form"))
 				return
 			}

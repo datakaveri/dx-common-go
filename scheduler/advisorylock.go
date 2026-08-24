@@ -36,7 +36,7 @@ func tryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, key int64) (unlock
 		// Best-effort unlock on the same connection; PostgreSQL also
 		// releases session-level advisory locks automatically when the
 		// connection closes, so a failed unlock here is not a leak.
-		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+		_, _ = conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", key)
 		conn.Release()
 	}
 	return unlock, true, nil

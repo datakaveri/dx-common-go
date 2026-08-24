@@ -25,8 +25,8 @@ func jwksServer(t *testing.T) (*httptest.Server, *rsa.PrivateKey) {
 		t.Fatalf("genkey: %v", err)
 	}
 	b64 := base64.RawURLEncoding
-	n := b64.EncodeToString(key.PublicKey.N.Bytes())
-	e := b64.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes())
+	n := b64.EncodeToString(key.N.Bytes())
+	e := b64.EncodeToString(big.NewInt(int64(key.E)).Bytes())
 	jwks := map[string]any{
 		"keys": []map[string]any{{
 			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": testKID, "n": n, "e": e,

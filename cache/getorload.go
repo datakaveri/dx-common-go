@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -37,7 +38,14 @@ func GetOrLoad[T any](ctx context.Context, c Cache, key string, ttl time.Duratio
 	if err != nil {
 		return zero, err
 	}
-	return out.(T), nil
+	v, ok := out.(T)
+	if !ok {
+		// Unreachable in correct use — the singleflight result is the value
+		// load returned, always a T. Handled rather than a bare assertion so a
+		// future misuse surfaces as an error, not a panic on the hot path.
+		return zero, fmt.Errorf("cache: GetOrLoad key %q decoded into an unexpected type", key)
+	}
+	return v, nil
 }
 
 // cached reads and decodes key; any error or decode failure is a miss.

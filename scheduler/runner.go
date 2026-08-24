@@ -104,7 +104,7 @@ func (r *Runner) runLoop(ctx context.Context, rj *registeredJob) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration(rand.Int63n(int64(rj.job.Jitter)))):
+		case <-time.After(time.Duration(rand.Int63n(int64(rj.job.Jitter)))): //nolint:gosec // G404: non-crypto scheduling jitter; math/rand is correct
 		}
 	}
 

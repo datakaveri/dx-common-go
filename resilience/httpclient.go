@@ -176,7 +176,7 @@ func (t *retryTransport) attempt(req *http.Request) (*http.Response, error) {
 	}
 	var resp *http.Response
 	err := cfg.breaker.Execute(func() error {
-		r, e := cfg.base.RoundTrip(req)
+		r, e := cfg.base.RoundTrip(req) //nolint:bodyclose // ownership passes to the caller (RoundTrip), which drains/closes between retries and on return
 		resp = r
 		if e != nil {
 			return e

@@ -71,7 +71,7 @@ func Middleware(pub *Publisher, originServer string) func(http.Handler) http.Han
 				return
 			}
 			// Fire-and-forget off the request path.
-			go pub.Publish(rec)
+			go pub.Publish(rec) //nolint:contextcheck // fire-and-forget audit publish, deliberately detached from the request lifetime
 		})
 	}
 }

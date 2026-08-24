@@ -14,7 +14,7 @@ import (
 func Recovery(logger *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			defer func() {
+			defer func() { //nolint:contextcheck // panic recovery reads r.Context() directly; no context is detached here
 				if rec := recover(); rec != nil {
 					stack := debug.Stack()
 					logger.Error("panic recovered",

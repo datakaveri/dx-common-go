@@ -222,13 +222,13 @@ func TestPITLifecycle(t *testing.T) {
 
 func TestRepoV2(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/things/_doc/yes":
+		switch r.URL.Path {
+		case "/things/_doc/yes":
 			_, _ = w.Write([]byte(`{"_source":{"name":"x"}}`))
-		case r.URL.Path == "/things/_doc/no":
+		case "/things/_doc/no":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":{"type":"not_found","reason":"missing"}}`))
-		case r.URL.Path == "/_bulk":
+		case "/_bulk":
 			raw, _ := io.ReadAll(r.Body)
 			if !strings.Contains(string(raw), `"delete"`) {
 				t.Fatalf("BulkDelete should emit delete metas: %s", raw)

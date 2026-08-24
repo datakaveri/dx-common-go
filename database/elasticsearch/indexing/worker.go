@@ -66,7 +66,7 @@ func (w *Worker) nextDelay() time.Duration {
 	if w.Jitter <= 0 {
 		return w.Interval
 	}
-	delta := time.Duration(rand.Int63n(int64(2*w.Jitter+1))) - w.Jitter
+	delta := time.Duration(rand.Int63n(int64(2*w.Jitter+1))) - w.Jitter //nolint:gosec // G404: non-crypto jitter for retry spacing; math/rand is correct
 	d := w.Interval + delta
 	if d < 0 {
 		d = 0

@@ -62,8 +62,8 @@ func (h *jwksHarness) jwksJSON() map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	b64 := base64.RawURLEncoding
-	n := b64.EncodeToString(h.key.PublicKey.N.Bytes())
-	e := b64.EncodeToString(big.NewInt(int64(h.key.PublicKey.E)).Bytes())
+	n := b64.EncodeToString(h.key.N.Bytes())
+	e := b64.EncodeToString(big.NewInt(int64(h.key.E)).Bytes())
 	return map[string]any{"keys": []map[string]any{{
 		"kty": "RSA", "use": "sig", "alg": "RS256", "kid": testKID, "n": n, "e": e,
 	}}}

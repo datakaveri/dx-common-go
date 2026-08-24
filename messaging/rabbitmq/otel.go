@@ -66,7 +66,7 @@ func startProducerSpan(ctx context.Context, exchange, routingKey string, extra .
 		trace.WithSpanKind(trace.SpanKindProducer),
 		trace.WithAttributes(
 			semconv.MessagingSystemRabbitmq,
-			semconv.MessagingOperationTypePublish,
+			semconv.MessagingOperationTypeSend,
 			semconv.MessagingDestinationName(exchange),
 			semconv.MessagingRabbitmqDestinationRoutingKey(routingKey),
 		),

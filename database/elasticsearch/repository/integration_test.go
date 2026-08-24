@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -92,8 +91,7 @@ func TestRepo_Get_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing document")
 	}
-	var dxe dxerrors.DxError
-	if !errors.As(err, &dxe) || dxe.Code() != dxerrors.ErrNotFound {
+	if !dxerrors.IsNotFoundError(err) {
 		t.Fatalf("expected a dxerrors NotFound, got %v", err)
 	}
 }

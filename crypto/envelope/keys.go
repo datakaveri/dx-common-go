@@ -80,8 +80,8 @@ func ParsePublicKeyPEM(pemBytes []byte) (*ecdsa.PublicKey, error) {
 // base64url(SHA-256(X||Y)) of the uncompressed point, truncated to 16 bytes.
 func KeyID(pub *ecdsa.PublicKey) string {
 	var buf [64]byte
-	pub.X.FillBytes(buf[:32])
-	pub.Y.FillBytes(buf[32:])
+	pub.X.FillBytes(buf[:32]) //nolint:staticcheck // SA1019: FillBytes only READS the coordinate to derive a stable key id; it does not modify the key, and switching to ecdh().Bytes() would change the id format and break existing ids
+	pub.Y.FillBytes(buf[32:]) //nolint:staticcheck // SA1019: read-only, see the X line above
 	sum := sha256.Sum256(buf[:])
 	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }

@@ -85,7 +85,7 @@ func WithAdvisoryLock(ctx context.Context, pool *pgxpool.Pool, key int64, fn fun
 		// returns it to the pool regardless, but PostgreSQL also releases
 		// session-level advisory locks automatically when the connection
 		// closes, so a failed unlock here is not a leak.
-		if _, err := conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", key); err != nil {
+		if _, err := conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", key); err != nil {
 			_ = err
 		}
 	}()

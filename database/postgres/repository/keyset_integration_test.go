@@ -125,7 +125,7 @@ func walkKeyset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, idType st
 		pos[id] = i
 	}
 	hi, mid, lo := mkID(12), mkID(11), mkID(10)
-	if !(pos[hi] < pos[mid] && pos[mid] < pos[lo]) {
+	if pos[hi] >= pos[mid] || pos[mid] >= pos[lo] {
 		t.Fatalf("tied rows out of id-DESC order: %s@%d %s@%d %s@%d", hi, pos[hi], mid, pos[mid], lo, pos[lo])
 	}
 }

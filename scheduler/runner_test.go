@@ -30,10 +30,7 @@ func TestRunner_FiresJobPeriodically(t *testing.T) {
 	}()
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if atomic.LoadInt64(&runs) >= 3 {
-			break
-		}
+	for atomic.LoadInt64(&runs) < 3 {
 		select {
 		case <-deadline:
 			t.Fatalf("only %d runs after 2s, want >= 3", atomic.LoadInt64(&runs))
@@ -67,10 +64,7 @@ func TestRunner_PanicRecoveryDoesNotStopTheLoop(t *testing.T) {
 	}()
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if atomic.LoadInt64(&calls) >= 2 {
-			break
-		}
+	for atomic.LoadInt64(&calls) < 2 {
 		select {
 		case <-deadline:
 			t.Fatalf("only %d calls after 2s, want >= 2 (loop must survive a panic)", atomic.LoadInt64(&calls))
@@ -101,10 +95,7 @@ func TestRunner_ErrorDoesNotStopTheLoop(t *testing.T) {
 	}()
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if atomic.LoadInt64(&calls) >= 3 {
-			break
-		}
+	for atomic.LoadInt64(&calls) < 3 {
 		select {
 		case <-deadline:
 			t.Fatalf("only %d calls after 2s, want >= 3", atomic.LoadInt64(&calls))
