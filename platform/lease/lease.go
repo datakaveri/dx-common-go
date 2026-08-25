@@ -99,7 +99,12 @@ type Store struct {
 // The primary key on name is the concurrency control — exactly one INSERT wins,
 // and the rest are resolved by the ON CONFLICT predicate below. No application
 // lock, no check-then-act.
-func New(db dxsql.DB, table string) *Store { return &Store{db: db, table: table} }
+func New(db dxsql.DB, table string) *Store {
+	// table is interpolated; MustIdent enforces the compile-time-constant
+	// contract (panics on an unsafe identifier). Callers pass a literal.
+	_ = dxsql.MustIdent(table)
+	return &Store{db: db, table: table}
+}
 
 // Lease is a held claim.
 type Lease struct {

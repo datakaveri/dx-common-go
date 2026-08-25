@@ -81,6 +81,9 @@ type Store struct {
 // table is interpolated into SQL — a table name cannot be a bind parameter —
 // so it must be a trusted constant, never request input.
 func New(db dxsql.DB, table string) *Store {
+	// table is interpolated; MustIdent enforces the compile-time-constant
+	// contract (panics on an unsafe identifier). Callers pass a literal.
+	_ = dxsql.MustIdent(table)
 	return &Store{db: db, table: table}
 }
 

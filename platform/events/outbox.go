@@ -65,6 +65,10 @@ func WithLease(d time.Duration) OutboxOption {
 }
 
 func NewOutbox(db dxsql.DB, table string, opts ...OutboxOption) *Outbox {
+	// table is interpolated, never bound. MustIdent enforces the "compile-time
+	// constant" contract: a name that is not a safe identifier panics here, at
+	// construction, rather than reaching SQL. Every caller passes a literal.
+	_ = dxsql.MustIdent(table)
 	o := &Outbox{db: db, table: table, owner: newOwnerID(), lease: DefaultLease}
 	for _, opt := range opts {
 		opt(o)
