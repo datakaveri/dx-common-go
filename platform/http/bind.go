@@ -164,6 +164,15 @@ func bind[Req any](r *http.Request) (Req, error) {
 	if err := bindStruct(v, r); err != nil {
 		return req, err
 	}
+	// A list request's query contract runs AFTER ordinary binding, so the Actor
+	// and path values it just populated are available and are not re-derived by
+	// hand. This is the composable hook; unlike Binder it does not replace
+	// binding. See ListContract.
+	if lc, ok := any(&req).(ListContract); ok {
+		if err := bindListContract(r, lc); err != nil {
+			return req, err
+		}
+	}
 	return req, nil
 }
 
