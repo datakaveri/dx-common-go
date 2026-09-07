@@ -33,3 +33,7 @@ Thumbs.db
 
 # Hot reload
 air
+
+# Go build artifacts (binaries — do not commit)
+/server
+*.test
