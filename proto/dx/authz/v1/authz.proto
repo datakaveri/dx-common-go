@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+// Package dx.authz.v1 is the internal gRPC mirror of the AuthZEN Access
+// Evaluation contract (ADR-14 / §4.6).
+//
+// The JSON model at POST /access/v1/evaluation is CANONICAL. This exists only so
+// hot-path internal callers (a PEP evaluating against the PDP many times per
+// request) can avoid JSON on the wire. A round-trip equivalence test pins the
+// two representations together, so the mirror can never silently drift from the
+// contract it mirrors.
+//
+// Free-form members (`properties`) are google.protobuf.Struct — faithful to
+// arbitrary JSON. Response entitlements/obligations are NOT remirrored: they
+// travel to a data plane inside the signed attestation (JWS), which the data
+// plane verifies itself (invariant I-8), never as fields a caller reads here.
+package dx.authz.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/authzpb;authzpb";
+
+// AuthorizationService is the gRPC face of the composite PDP.
+service AuthorizationService {
+  rpc Evaluate(EvaluationRequest) returns (EvaluationResponse);
+  rpc EvaluateBatch(EvaluationsRequest) returns (EvaluationsResponse);
+}
+
+message EvaluationRequest {
+  Subject subject = 1;
+  Action action = 2;
+  Resource resource = 3;
+  RequestContext context = 4;
+}
+
+message Subject {
+  string type = 1;
+  string id = 2;
+  google.protobuf.Struct properties = 3;
+}
+
+message Action {
+  string name = 1;
+  google.protobuf.Struct properties = 2;
+}
+
+message Resource {
+  string type = 1;
+  string id = 2;
+  google.protobuf.Struct properties = 3;
+}
+
+message RequestContext {
+  string agent = 1;
+  DXRequestContext dx = 2;
+}
+
+message DXRequestContext {
+  string profile = 1;
+  OperationRef operation = 2;
+  Actor actor = 3;
+  PEPInfo pep = 4;
+  string purpose = 5;
+  RequestFacts request = 6;
+  ApprovalRef approval = 7;
+}
+
+message OperationRef {
+  string service = 1;
+  string id = 2;
+  string manifest_digest = 3;
+}
+
+message Actor {
+  string type = 1;
+  string id = 2;
+  string delegation_id = 3;
+  string session_id = 4;
+  repeated string chain = 5;
+  string transaction_id = 6;
+  string message_id = 7;
+}
+
+message PEPInfo {
+  string id = 1;
+  repeated string capabilities = 2;
+}
+
+message RequestFacts {
+  repeated string fields = 1;
+  string delivery_mode = 2;
+  string terms_hash = 3;
+  string amount = 4;
+  string currency = 5;
+  string payee = 6;
+}
+
+message ApprovalRef {
+  string id = 1;
+  google.protobuf.Timestamp approved_at = 2;
+  google.protobuf.Timestamp approved_until = 3;
+}
+
+message EvaluationResponse {
+  bool decision = 1;
+  DecisionContext context = 2;
+}
+
+message DecisionContext {
+  string reason_user = 1;
+  DXDecisionContext dx = 2;
+}
+
+message DXDecisionContext {
+  string profile = 1;
+  string evaluation_id = 2;
+  string reason_code = 3;
+  bool complete = 4;
+  string evaluated_profile = 5;
+  google.protobuf.Timestamp valid_until = 6;
+  Evidence evidence = 7;
+  string attestation = 8;
+}
+
+message Evidence {
+  string manifest_digest = 1;
+  string fga_model_id = 2;
+  string grant_projection_revision = 3;
+  int32 condition_schema_version = 4;
+  string mapping_digest = 5;
+}
+
+message EvaluationsRequest {
+  repeated EvaluationRequest evaluations = 1;
+}
+
+message EvaluationsResponse {
+  repeated EvaluationResponse evaluations = 1;
+}

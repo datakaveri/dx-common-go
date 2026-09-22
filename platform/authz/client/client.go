@@ -155,6 +155,26 @@ func (c *Client) Authorize(ctx context.Context, req decision.EvaluationRequest) 
 	return Result{Allowed: true, Response: resp}, nil
 }
 
+// AuthorizeUserOnResource is the common service-side relationship check: may the
+// human `userID` perform `permission` (a ratified vocabulary permission —
+// read|query|write|share|own) on `resourceType`:`resourceID`?
+//
+// It is the AuthZEN replacement for the per-service dxfga relationship checks:
+// the caller names the PERMISSION, and the PDP maps it to the FGA relation
+// through the ratified vocabulary — so a service never hand-writes a relation
+// name (the defect that let catalogue/marketplace check `owner`/`viewer`,
+// relations the model does not define). The request resolves to the relationship
+// profile, so it needs no grant projection and answers exactly as the legacy
+// /v1/check did — for the permissions that map to relations that actually exist.
+func (c *Client) AuthorizeUserOnResource(ctx context.Context, userID, permission, resourceType, resourceID string) (bool, error) {
+	res, err := c.Authorize(ctx, decision.EvaluationRequest{
+		Subject:  decision.Subject{Type: decision.SubjectIdentity, ID: userID},
+		Action:   decision.Action{Name: permission},
+		Resource: decision.Resource{Type: resourceType, ID: resourceID},
+	})
+	return res.Allowed, err
+}
+
 // stampPEP sets context.dx.pep from the client config when the caller left it
 // unset, so a PEP cannot forget to advertise its capabilities.
 func (c *Client) stampPEP(req *decision.EvaluationRequest) {

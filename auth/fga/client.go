@@ -15,7 +15,18 @@ import (
 	"github.com/datakaveri/dx-common-go/resilience"
 )
 
-// Client is a typed REST client for dx-authz-go.
+// Client is a typed REST client for dx-authz-go's legacy /v1/check + /v1/policies
+// endpoints.
+//
+// SUPERSEDED (do not add new callers): for authorization decisions use
+// platform/authz/client.Client, which speaks the standards-based AuthZEN
+// /access/v1/evaluation contract and names ratified PERMISSIONS rather than
+// hand-written relation names. This client is retained for the deprecated
+// /v1/check path (selected per service by authz.mode=legacy and by the gateway's
+// legacy/shadow modes) and for policy CRUD, and will be removed once every
+// decision caller is on the AuthZEN client. The request/response TYPES in this
+// package (PolicyRequest, CheckRequest, …) remain the wire contract for the
+// policy.* events and are not deprecated.
 //
 // It is safe for concurrent use; underlying http.Client transport pooling is
 // inherited. Callers should construct one Client per service and reuse it.

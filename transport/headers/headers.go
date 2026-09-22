@@ -65,6 +65,15 @@ const (
 	// Agent headers are minted only for delegated (agent-acting) requests.
 	HdrAgentSubject = "X-Agent-Subject"
 	HdrDelegationID = "X-Delegation-Id"
+	// HdrAttestation carries the PDP's signed data-access decision (AuthZEN
+	// data_access profile) from the gateway to a data plane, which VERIFIES it
+	// and enforces the obligations it bears. It is minted by the PDP and
+	// forwarded by the gateway, and set fresh on the upstream request — a
+	// client-supplied value is overwritten and, either way, fails the signature
+	// and audience checks. It is NOT in All: All is the identity-projection
+	// headers this package mints, and the attestation is a separate mechanism
+	// (signed, not header-trusted).
+	HdrAttestation = "X-Dx-Attestation"
 )
 
 // All is every header this package mints.

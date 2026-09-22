@@ -32,6 +32,7 @@ type options struct {
 	log     *zap.Logger
 	title   string
 	detail  string
+	headers map[string]string
 }
 
 // Option configures a handler adapter.
@@ -53,12 +54,35 @@ func WithMessage(title, detail string) Option {
 	return func(o *options) { o.title, o.detail = title, detail }
 }
 
+// WithResponseHeaders sets static response headers on EVERY response from the
+// route (success and error alike), before the body is written. The common use
+// is signalling a deprecated endpoint — Deprecation (RFC 8594) and a Link to its
+// successor — but it is general. Keys are canonicalised by http.Header.Set.
+func WithResponseHeaders(h map[string]string) Option {
+	return func(o *options) {
+		if o.headers == nil {
+			o.headers = make(map[string]string, len(h))
+		}
+		for k, v := range h {
+			o.headers[k] = v
+		}
+	}
+}
+
 func resolve(opts []Option) *options {
 	o := &options{title: "Success", log: zap.NewNop()}
 	for _, f := range opts {
 		f(o)
 	}
 	return o
+}
+
+// applyStaticHeaders writes the route's WithResponseHeaders onto the response
+// before any body, so they ride both success and error responses.
+func applyStaticHeaders(w http.ResponseWriter, o *options) {
+	for k, v := range o.headers {
+		w.Header().Set(k, v)
+	}
 }
 
 // Handle adapts a Handler to an http.HandlerFunc: decode, authenticate,
@@ -79,6 +103,7 @@ func Handle[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc 
 func handle[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc {
 	o := resolve(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		applyStaticHeaders(w, o)
 		req, err := bind[Req](r)
 		if err != nil {
 			writeError(w, r, err, o)
@@ -97,6 +122,7 @@ func handle[Req, Res any](h Handler[Req, Res], opts ...Option) http.HandlerFunc 
 func HandleVoid[Req any](h func(context.Context, Req) error, opts ...Option) http.HandlerFunc {
 	o := resolve(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		applyStaticHeaders(w, o)
 		req, err := bind[Req](r)
 		if err != nil {
 			writeError(w, r, err, o)
@@ -120,6 +146,7 @@ func HandleVoid[Req any](h func(context.Context, Req) error, opts ...Option) htt
 func HandleRaw[Req any](h func(context.Context, Req) (Response, error), opts ...Option) http.HandlerFunc {
 	o := resolve(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		applyStaticHeaders(w, o)
 		req, err := bind[Req](r)
 		if err != nil {
 			writeError(w, r, err, o)
