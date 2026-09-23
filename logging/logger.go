@@ -39,7 +39,13 @@ func New(cfg Config) (*zap.Logger, error) {
 	zcfg.EncoderConfig.TimeKey = "time"
 	zcfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 
-	logger, err := zcfg.Build()
+	// S13.2 backstop: strip/mask known secret and credential fields before
+	// they reach the encoder, regardless of what a call site logs. Wrapped
+	// here rather than left to each handler, so it applies to every line this
+	// logger (and everything derived from it via .With/.Named) ever writes.
+	logger, err := zcfg.Build(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		return NewRedactingCore(core)
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("logging.New: build zap logger: %w", err)
 	}

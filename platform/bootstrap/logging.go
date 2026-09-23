@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+
+	"github.com/datakaveri/dx-common-go/logging"
 )
 
 // newLogger builds the service logger from the configured level.
@@ -36,5 +38,10 @@ func newLogger(level, service, version string) (*zap.Logger, error) {
 	if version != "" {
 		fields = append(fields, zap.String("version", version))
 	}
-	return cfg.Build(zap.Fields(fields...))
+	// S13.2 backstop: every bootstrap.Run service gets the same field-key
+	// denylist + secret-value masking as logging.New, applied at the single
+	// point every one of them builds its logger — see logging.NewRedactingCore.
+	return cfg.Build(zap.Fields(fields...), zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		return logging.NewRedactingCore(core)
+	}))
 }
