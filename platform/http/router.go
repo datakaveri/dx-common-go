@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/datakaveri/dx-common-go/platform/errors"
 	"github.com/datakaveri/dx-common-go/platform/observability/health"
 )
 
@@ -193,6 +194,17 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 			})
 		})
 	}
+
+	// A request that matches NO route, and one that matches a path but not its
+	// method, are answered by chi's defaults: the bare text "404 page not
+	// found", logged as an ordinary 404 and nothing else. Both are then
+	// indistinguishable from a handler's own 404 — "this entity does not
+	// exist" reads exactly like "this ENDPOINT does not exist", which is the
+	// single most expensive minute in debugging a new client. Say which it is,
+	// in the log and in the body, and answer in the platform's error shape so
+	// a client parses one format rather than two.
+	r.NotFound(noRouteHandler(spec.Logger))
+	r.MethodNotAllowed(methodNotAllowedHandler(spec.Logger))
 
 	timeout := resolveTimeout(spec.Timeout)
 
@@ -393,4 +405,48 @@ func route(method, path string, h http.HandlerFunc, opts []RouteOption) Route {
 		o(&rt)
 	}
 	return rt
+}
+
+// noRouteHandler answers a request whose path matches no registered route.
+//
+// Logged at WARN, not Info: nothing in the service asked for this path, so it
+// is either a client pointed at the wrong version/prefix or a route that was
+// meant to be registered and is not. Both deserve to be visible without
+// turning on debug.
+func noRouteHandler(log *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if log != nil {
+			log.Warn("no route matched — the path is not registered on this service",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("request_id", RequestIDFrom(r.Context())))
+		}
+		writeProblem(w, ToProblem(errors.NotFound(
+			"no endpoint is registered for "+r.Method+" "+r.URL.Path), nil))
+	}
+}
+
+// methodNotAllowedHandler answers a request whose path exists under a
+// different method. Distinguished from the no-route case because the fix is
+// different: the caller has the right URL and the wrong verb.
+func methodNotAllowedHandler(log *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if log != nil {
+			log.Warn("method not allowed — the path is registered under a different method",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.String("request_id", RequestIDFrom(r.Context())))
+		}
+		p := ToProblem(errors.Validation(
+			r.Method+" is not allowed on "+r.URL.Path), nil)
+		p.Status = http.StatusMethodNotAllowed
+		writeProblem(w, p)
+	}
+}
+
+// writeProblem renders a Problem in the platform error shape.
+func writeProblem(w http.ResponseWriter, p Problem) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(p.Status)
+	_ = writeJSON(w, p)
 }

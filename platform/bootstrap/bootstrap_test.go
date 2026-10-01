@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,7 +43,7 @@ func newApp(t *testing.T) (*App[testConfig], *observer.ObservedLogs) {
 // boot sequence being hand-written 18 times. bootstrap owns the order, so the
 // logger cannot precede config.
 func TestLoggerHonoursConfiguredLevel(t *testing.T) {
-	debug, err := newLogger("debug", "svc", "v1")
+	debug, err := newLogger("debug", logFormatJSON, "svc", "v1")
 	if err != nil {
 		t.Fatalf("build debug logger: %v", err)
 	}
@@ -50,7 +51,7 @@ func TestLoggerHonoursConfiguredLevel(t *testing.T) {
 		t.Error("a debug logger must emit debug lines — this is the bug the three services have")
 	}
 
-	warn, err := newLogger("warn", "svc", "v1")
+	warn, err := newLogger("warn", logFormatJSON, "svc", "v1")
 	if err != nil {
 		t.Fatalf("build warn logger: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestLoggerHonoursConfiguredLevel(t *testing.T) {
 // TestLoggerRejectsAnUnparseableLevel: the operator asked for something
 // specific, so silently running at info hides a config error.
 func TestLoggerRejectsAnUnparseableLevel(t *testing.T) {
-	if _, err := newLogger("verbose-ish", "svc", ""); err == nil {
+	if _, err := newLogger("verbose-ish", logFormatJSON, "svc", ""); err == nil {
 		t.Error("an unparseable level must fail the boot, not fall back to info")
 	}
 }
@@ -324,4 +325,42 @@ func freePort(t *testing.T) int {
 		t.Fatalf("release probe listener: %v", err)
 	}
 	return port
+}
+
+// TestLoggerFormatResolution pins the three-way choice. auto is the default and
+// must not become console in a container: the format is what a log collector
+// parses, so getting it wrong off a terminal breaks ingestion silently.
+func TestLoggerFormatResolution(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	for _, tc := range []struct {
+		format string
+		want   bool
+	}{
+		{"json", false},
+		{"JSON", false},
+		{" console ", true},
+		{"nonsense", isTerminal(os.Stderr)}, // treated as auto
+		{"", isTerminal(os.Stderr)},
+	} {
+		if got := useConsole(tc.format); got != tc.want {
+			t.Errorf("useConsole(%q) = %v, want %v", tc.format, got, tc.want)
+		}
+	}
+
+	// Every format must still build, at every level — the logger is how a boot
+	// failure is reported, so it may not be the thing that fails.
+	for _, f := range []string{logFormatAuto, logFormatConsole, logFormatJSON} {
+		if _, err := newLogger("info", f, "svc", "v1"); err != nil {
+			t.Errorf("newLogger(format=%q): %v", f, err)
+		}
+	}
+}
+
+// TestColourRespectsNoColor: no-color.org is the convention every other CLI on
+// the machine follows, and presence alone is the signal — not a value.
+func TestColourRespectsNoColor(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	if colour() {
+		t.Error("NO_COLOR set, even empty, must disable colour")
+	}
 }

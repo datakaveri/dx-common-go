@@ -145,7 +145,15 @@ func Load[T any](opts Options) (*T, error) {
 // per-service redeclaration of ServerConfig (21 copies) and the auth config
 // (20 copies), and gives bootstrap a fixed place to read what it needs.
 type Base struct {
-	LogLevel   string `mapstructure:"log_level"`
+	LogLevel string `mapstructure:"log_level"`
+	// LogFormat selects the encoder: "console" (human, coloured at a
+	// terminal), "json" (one object per line, for aggregation), or "auto" —
+	// the default — which is console at a terminal and JSON everywhere else.
+	//
+	// Defaulted rather than required because both audiences are served
+	// correctly by the same unset value: a developer running the binary sees a
+	// readable stream, a container writing to a collector emits JSON.
+	LogFormat  string `mapstructure:"log_format"`
 	Server     Server `mapstructure:"server"`
 	SchemaMode string `mapstructure:"schema_mode"`
 	// GRPC is the internal service-to-service surface. Port 0 means the service
@@ -249,6 +257,7 @@ type Observability struct {
 func PlatformDefaults() map[string]any {
 	return map[string]any{
 		"log_level":               "info",
+		"log_format":              "auto",
 		"server.port":             8080,
 		"server.read_timeout":     "15s",
 		"server.write_timeout":    "30s",

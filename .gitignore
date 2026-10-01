@@ -37,3 +37,7 @@ air
 # Go build artifacts (binaries — do not commit)
 /server
 *.test
+
+# personal research notes (not for commit)
+/docs/my/
+.idea/

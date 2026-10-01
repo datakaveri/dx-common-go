@@ -33,6 +33,21 @@ const (
 	LogTypeCredit     LogType = "CREDIT"
 )
 
+// Origin servers: the values of the Postgres enum origin_server that
+// user_activity_audit_log.origin_server is typed with (Java schema and
+// dx-audit-go migration alike). Any other value makes the consumer's INSERT
+// fail with SQLSTATE 22P02, so pass one of these to Middleware / BaseRecord.
+const (
+	OriginCatalogue = "CATALOGUE"
+	OriginAAA       = "AAA"
+	OriginFile      = "FILE"
+	OriginACLAPD    = "ACL_APD"
+	OriginNGSILD    = "NGSI_LD"
+	OriginGateway   = "GATEWAY"
+	OriginOGCRS     = "OGC_RS"
+	OriginSandbox   = "SANDBOX"
+)
+
 // createdAtLayout matches Java LocalDateTime.toString() (no zone); the value
 // is stored verbatim into a Postgres timestamp column.
 const createdAtLayout = "2006-01-02T15:04:05.000000"

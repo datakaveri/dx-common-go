@@ -26,7 +26,7 @@ func TestNewLoggerRedactsProhibitedFields(t *testing.T) {
 	orig := os.Stderr
 	os.Stderr = w
 
-	logger, buildErr := newLogger("info", "svc", "v1")
+	logger, buildErr := newLogger("info", logFormatJSON, "svc", "v1")
 	require.NoError(t, buildErr)
 	logger.Info("upstream call",
 		zap.String("authorization", "Bearer super-secret-token"),
