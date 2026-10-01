@@ -30,10 +30,22 @@ func FromCtx(ctx context.Context) *Record {
 // SetAction marks the request auditable with the given business action.
 // No-op when auditing isn't wired (nil record). Mirrors the Java pattern of
 // handlers attaching an audit log to the routing context.
+//
+// It also fills the caller's identity when the record has none. Services mount
+// Middleware on the route prefix, which runs BEFORE the authentication
+// resolver, so BaseRecord saw no user and every record went out without
+// user_id — a NOT NULL column in the audit table, so all were dropped (F22).
+// The handler's ctx is past authentication, so the user is there now. An
+// identity the middleware did see is never overwritten.
 func SetAction(ctx context.Context, action string) *Record {
 	r := FromCtx(ctx)
 	if r != nil {
 		r.Action = action
+		if r.UserID == "" {
+			if user, ok := auth.UserFromCtx(ctx); ok {
+				r.fillIdentity(user)
+			}
+		}
 	}
 	return r
 }
