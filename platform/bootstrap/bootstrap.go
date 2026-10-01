@@ -311,7 +311,7 @@ func run[C config.Configurer](spec Spec[C]) error {
 	}
 
 	// 3. Logger. THE FIX: it cannot precede config, because bootstrap owns both.
-	log, err := newLogger(base.LogLevel, spec.Name, spec.Version)
+	log, err := newLogger(base.LogLevel, base.LogFormat, spec.Name, spec.Version)
 	if err != nil {
 		return fmt.Errorf("build logger: %w", err)
 	}
