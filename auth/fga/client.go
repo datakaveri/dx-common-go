@@ -199,16 +199,26 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 
 	if out != nil && len(respBody) > 0 {
-		// Successful responses use the DxResponse envelope; the payload lives
-		// under "results". Fall back to direct decoding for legacy bodies.
+		// Successful responses use the platform envelope (platform/http), whose
+		// payload lives under "result" — singular. This read "results" only, so
+		// every real authz answer fell through to the top-level decode, Allowed
+		// stayed false, and the gateway denied every request it checked (F34).
+		// "results" is still accepted for older bodies, then direct decoding.
 		var envelope struct {
+			Result  json.RawMessage `json:"result"`
 			Results json.RawMessage `json:"results"`
 		}
-		if err := json.Unmarshal(respBody, &envelope); err == nil && len(envelope.Results) > 0 {
-			if err := json.Unmarshal(envelope.Results, out); err != nil {
-				return fmt.Errorf("fga client: decode results: %w", err)
+		if err := json.Unmarshal(respBody, &envelope); err == nil {
+			payload := envelope.Result
+			if len(payload) == 0 {
+				payload = envelope.Results
 			}
-			return nil
+			if len(payload) > 0 {
+				if err := json.Unmarshal(payload, out); err != nil {
+					return fmt.Errorf("fga client: decode result: %w", err)
+				}
+				return nil
+			}
 		}
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("fga client: decode response: %w", err)
