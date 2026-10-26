@@ -3,6 +3,8 @@ package jwt
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -35,6 +37,11 @@ type Config struct {
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 	// Enabled controls whether JWT validation is active. Set false for local dev.
 	Enabled bool `mapstructure:"enabled"`
+	// SkipExpiryCheck accepts tokens whose exp has passed, so a long local or
+	// Postman session does not need a fresh Keycloak token every few minutes.
+	// Signature, algorithm, issuer, audience, nbf and iat are still enforced;
+	// only exp is ignored. Refused when DX_ENV is production.
+	SkipExpiryCheck bool `mapstructure:"skip_expiry_check"`
 }
 
 // Validate checks that the configuration is safe to use. Issuer and Audience
@@ -55,6 +62,10 @@ func (c Config) Validate() error {
 	}
 	if c.LeewaySeconds < 0 || c.LeewaySeconds > maxLeewaySeconds {
 		return fmt.Errorf("jwt config: leeway_seconds must be between 0 and %d", maxLeewaySeconds)
+	}
+	if env := os.Getenv("DX_ENV"); c.SkipExpiryCheck &&
+		(strings.EqualFold(env, "production") || strings.EqualFold(env, "prod")) {
+		return errors.New("jwt config: skip_expiry_check is not allowed when DX_ENV=" + env)
 	}
 	return nil
 }
