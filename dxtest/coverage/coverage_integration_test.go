@@ -249,7 +249,16 @@ func TestCoverage_RabbitMQProducerConsumerSpans(t *testing.T) {
 		t.Fatal("message was never delivered to the consumer")
 	}
 
-	spans := exp.GetSpans()
+	// The handler signals BEFORE it returns, and dispatch ends the consumer
+	// span in a defer after the handler returns — so the span is exported a
+	// moment after `received`. Wait for it rather than racing it; the assert
+	// below still fails (with its message) if it never arrives.
+	var spans tracetest.SpanStubs
+	assert.Eventually(t, func() bool {
+		spans = exp.GetSpans()
+		return hasSpanKind(spans, trace.SpanKindConsumer)
+	}, 5*time.Second, 10*time.Millisecond)
+
 	assert.True(t, hasSpanKind(spans, trace.SpanKindProducer), "no producer span — ReliablePublisher.Publish is not starting one")
 	assert.True(t, hasSpanKind(spans, trace.SpanKindConsumer), "no consumer span — ConsumerRunner.dispatch is not starting one")
 
