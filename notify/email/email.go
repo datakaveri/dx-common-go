@@ -53,6 +53,11 @@ type Request struct {
 	Status            string `json:"status,omitempty"`
 	AssetName         string `json:"assetName,omitempty"`
 	ExpiryAt          string `json:"expiryAt,omitempty"`
+	// Subject is the mail's subject line. Go-only and optional: Java's
+	// controlplane sends SMTP itself with its own subject, and its queue
+	// consumer (EmailRequest.fromJson) ignores the field. dx-notification-go
+	// uses it when set (F39 delegations, Ankit 2026-11-03).
+	Subject string `json:"subject,omitempty"`
 }
 
 func (r Request) validate() error {

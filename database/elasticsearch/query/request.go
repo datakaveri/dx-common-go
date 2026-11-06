@@ -7,8 +7,14 @@ type SearchRequest struct {
 	Query Query
 	Size  int
 	From  int
-	// Sort entries like {"created_at": "desc"}; applied in order.
+	// Sort entries like {"created_at": "desc"}; applied in order. On a search
+	// (repository.Search / SearchMulti) the entries are wrapped by SortOptions,
+	// which adds _score the way dx-common (Java) does; Scroll sends them as is.
 	Sort []map[string]string
+	// RelevanceFirst puts _score before the Sort fields — set it when a free-text
+	// query is present. False (the default) puts _score last, as the final
+	// tie-breaker. Java: QueryModel.relevanceFirst.
+	RelevanceFirst bool
 	// SourceIncludes / SourceExcludes filter the returned _source.
 	SourceIncludes []string
 	SourceExcludes []string
@@ -36,6 +42,25 @@ type SearchRequest struct {
 	// PIT pins the search to a point-in-time view (see repository.OpenPIT).
 	// When set, the request goes to /_search without an index path.
 	PIT *PIT
+}
+
+// scoreDesc is the relevance sort key (Java SortOptions.score, order desc).
+var scoreDesc = map[string]string{"_score": "desc"}
+
+// SortOptions is the sort a search sends — dx-common (Java) dev
+// QueryModel.toSortOptions: the Sort fields with _score desc last, or first
+// when RelevanceFirst is set; _score alone when there are no Sort fields. It
+// returns a new slice and never writes to r.Sort.
+func (r SearchRequest) SortOptions() []map[string]string {
+	out := make([]map[string]string, 0, len(r.Sort)+1)
+	if r.RelevanceFirst {
+		out = append(out, scoreDesc)
+	}
+	out = append(out, r.Sort...)
+	if !r.RelevanceFirst {
+		out = append(out, scoreDesc)
+	}
+	return out
 }
 
 // Body renders the request into the map Elasticsearch expects.

@@ -107,10 +107,15 @@ func Search(ctx context.Context, c *client.Client, index string, req query.Searc
 
 // SearchMulti executes req across several indices in one request (nil/empty
 // indices = all, or the PIT's indices when req.PIT is set).
+//
+// Every search sends req.SortOptions(): the requested fields plus _score, as
+// dx-common (Java) ElasticsearchServiceImpl.search does with
+// QueryModel.toSortOptions. Count and Scroll send no _score, as there.
 func SearchMulti(ctx context.Context, c *client.Client, indices []string, req query.SearchRequest) (*SearchResult, error) {
 	if req.PIT != nil {
 		indices = nil // a PIT search must not name indices in the path
 	}
+	req.Sort = req.SortOptions()
 	payload, err := c.Do(ctx, http.MethodPost, searchPath(indices), req.Body())
 	if err != nil {
 		return nil, err

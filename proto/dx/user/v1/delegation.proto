@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package dx.user.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/userpb;userpb";
+
+// DelegationService answers delegation questions for other platform services
+// from the Java controlplane's delegation tables (aaa.delegation_grants and
+// aaa.delegation_scope_constraints), which dx-user-go reads.
+//
+// Internal only. The caller is the verified WORKLOAD (metadata, checked by the
+// platform interceptor); dx-user-go keeps an allowlist of callers
+// (delegation_callers). A caller not listed is PERMISSION_DENIED.
+service DelegationService {
+  // CheckItemAccess is Java DelegationService.checkItemAccess, used by
+  // dx-catalogue-go for GET /item/access?isDelegator=true (P1): the items the
+  // delegation from delegator_id to delegate_id lets the delegate read.
+  //
+  // Java's INTENT, not its letter (Ankit 2026-11-03): the grant is read in the
+  // same direction as ResolveDelegation (delegator_id = the `did` the request
+  // named, delegate_id = the caller) and only an ACTIVE, unexpired grant with
+  // unexpired constraints counts. Java reads it reversed and ignores status
+  // and expiry.
+  //
+  // NOT_FOUND "Delegation doesn't exist for delegator and delegate" when no
+  // such grant exists; INVALID_ARGUMENT for ids that are not UUIDs.
+  rpc CheckItemAccess(CheckItemAccessRequest) returns (CheckItemAccessResponse);
+}
+
+message CheckItemAccessRequest {
+  // The user who granted the delegation (the request's `did`), UUID.
+  string delegator_id = 1;
+  // The user acting under it (the caller), UUID.
+  string delegate_id = 2;
+}
+
+message CheckItemAccessResponse {
+  // Item ids the delegation allows; exactly ["*"] when it allows every item
+  // (a constraint with scope "*", or scope "data-access" with entity_id "*").
+  // Empty when the delegation exists but names no item.
+  repeated string item_ids = 1;
+}
