@@ -52,13 +52,20 @@ func newLogger(level, format, service, version string) (*zap.Logger, error) {
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	cfg.EncoderConfig.TimeKey = "ts"
 	cfg.EncoderConfig.MessageKey = "msg"
+	// Stack traces on panics only. zap's production default puts one on
+	// every ERROR, so an expected failure ("dx-user unreachable") became an
+	// 80-line block that hid the one line that mattered. A returned error's
+	// cause chain is what explains it; a stack is for a bug, and panics carry
+	// their own (the HTTP recovery logs debug.Stack()).
+	cfg.DisableStacktrace = true
+	stacks := zap.AddStacktrace(zapcore.DPanicLevel)
 
 	if !useConsole(format) {
 		fields := []zap.Field{zap.String("service", service)}
 		if version != "" {
 			fields = append(fields, zap.String("version", version))
 		}
-		return cfg.Build(zap.Fields(fields...), zap.WrapCore(redactingCore))
+		return cfg.Build(zap.Fields(fields...), zap.WrapCore(redactingCore), stacks)
 	}
 
 	cfg.Encoding = logFormatConsole
@@ -74,7 +81,7 @@ func newLogger(level, format, service, version string) (*zap.Logger, error) {
 		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	}
 	cfg.EncoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
-	return cfg.Build(zap.WrapCore(redactingCore))
+	return cfg.Build(zap.WrapCore(redactingCore), stacks)
 }
 
 // redactingCore is the S13.2 backstop: every bootstrap.Run service gets the

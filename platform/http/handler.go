@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/datakaveri/dx-common-go/logging"
 	"github.com/datakaveri/dx-common-go/platform/paging"
 )
 
@@ -304,13 +305,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error, o *options) {
 
 	p := ToProblem(err, mappers)
 	if p.Status >= http.StatusInternalServerError {
-		// The real cause is logged here and nowhere else: the client body
-		// carries only the generic message ToProblem produced.
-		o.log.Error("request failed",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", p.Status),
-			zap.Error(err))
+		logFailure(r, p.Status, err, o.log)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -394,4 +389,43 @@ func embedsOptionalActor(t reflect.Type) bool {
 		}
 	}
 	return false
+}
+
+// logFailure writes the one line that explains a 5xx. The real cause is
+// logged here and nowhere else: the client body carries only the generic
+// message ToProblem produced, and the service layer returns the error rather
+// than logging it too, so one failure is one cause line (plus the request
+// line, which it joins by request_id).
+//
+// It logs through the request-scoped logger, so the line carries request_id
+// and trace_id; fallback is used only outside the platform stack.
+//
+// Level:
+//   - WARN for a dependency that is down or slow (502, 503, 504, or an error
+//     whose chain says so): the request was handled, it clears by itself, and
+//     nobody has to act on one occurrence;
+//   - ERROR for everything else — a bug or a misconfiguration a person must
+//     fix.
+//
+// No stack trace either way: the platform logger attaches stacks only to
+// panics (see bootstrap), and for an error returned up the call chain the
+// cause chain is the useful part.
+func logFailure(r *http.Request, status int, err error, fallback *zap.Logger) {
+	log := logging.FromOr(r.Context(), fallback)
+	fields := append([]zap.Field{
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path),
+		zap.Int("status", status),
+	}, logging.ErrorFields(err)...)
+	if transientStatus(status) || logging.IsDependencyFailure(err) {
+		log.Warn("request failed", fields...)
+		return
+	}
+	log.Error("request failed", fields...)
+}
+
+// transientStatus is a 5xx that says "a dependency is down or slow; try
+// again", as opposed to 500, which says "this service is broken".
+func transientStatus(status int) bool {
+	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }

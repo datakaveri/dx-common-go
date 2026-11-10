@@ -78,7 +78,30 @@ var titleMap = map[ErrorCode]string{
 
 // Error implements the error interface.
 func (e *BaseDxError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("[%s] %s: %v", e.code, e.message, e.cause)
+	}
 	return fmt.Sprintf("[%s] %s", e.code, e.message)
+}
+
+// WithCause returns a copy of err carrying cause, for errors.Is/errors.As and
+// for the log line. The cause is NEVER sent to the client — the response
+// carries only Message — so a service returns
+//
+//	errors.WithCause(errors.NewServiceUnavailable("could not grant the role; try again"), err)
+//
+// and the platform logs the failure once, cause included, instead of the
+// service logging it and the platform logging it again.
+//
+// An err that is not a *BaseDxError is returned unchanged.
+func WithCause(err DxError, cause error) DxError {
+	e, ok := err.(*BaseDxError)
+	if !ok || cause == nil {
+		return err
+	}
+	out := *e
+	out.cause = cause
+	return &out
 }
 
 // Code returns the ErrorCode.

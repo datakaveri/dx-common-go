@@ -287,6 +287,8 @@ func NewRouter(spec RouterSpec, sets ...RouteSet) http.Handler {
 			if spec.Auth.Authenticate != nil {
 				pr.Use(spec.Auth.Authenticate)
 			}
+			// After authentication, so the request line can name the caller.
+			pr.Use(recordSubject)
 			for _, rt := range protected {
 				h := rt.Handler
 				if rt.Optional {

@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/datakaveri/dx-common-go/logging"
+	"github.com/datakaveri/dx-common-go/platform/security/identity"
 	"github.com/datakaveri/dx-common-go/transport/clientip"
 )
 
@@ -186,41 +189,93 @@ func RequestIDFrom(ctx context.Context) string {
 
 // requestLogger logs one line per completed request.
 //
-// It records the request id so a line can be joined to a trace, and the status
-// and duration so a latency question is answerable without a tracing backend
-// being reachable.
+//	request  method=POST path=/iudx/v2/apd/dmp/mor status=201 duration_ms=12.4
+//	         bytes=310 request_id=… user_id=… remote_addr=…
+//
+// request_id joins it to every other line of the request (and the client
+// sees the same id in X-Request-ID); status and duration_ms answer a latency
+// question without a tracing backend. Milliseconds as a number, rounded to
+// 0.1 ms, because "duration": 0.170177447 is read wrong at a glance.
+//
+// user_id is the authenticated caller's id (the Keycloak subject UUID) when
+// the route authenticated one. It is a pseudonymous id, never a name or an
+// email: it lets "what did this user's requests do" be answered from the logs,
+// while the person behind the id stays in Keycloak and the audit store.
+//
+// Health probes and /metrics are logged at DEBUG: kubelet and Prometheus call
+// them every few seconds, and at INFO they bury every real request.
 func requestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			facts := &requestFacts{}
 
-			next.ServeHTTP(rec, r)
+			next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestFactsKey{}, facts)))
 
+			level := zapcore.InfoLevel
+			if isOpsPath(r.URL.Path) {
+				level = zapcore.DebugLevel
+			}
+			ce := log.Check(level, "request")
+			if ce == nil {
+				return
+			}
 			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Int("status", rec.status),
-				zap.Duration("duration", time.Since(start)),
+				zap.Float64("duration_ms", durationMS(time.Since(start))),
 				zap.Int("bytes", rec.bytes),
 				zap.String("request_id", RequestIDFrom(r.Context())),
-				zap.String("remote_addr", r.RemoteAddr),
 			}
+			if facts.userID != "" {
+				fields = append(fields, zap.String("user_id", facts.userID))
+			}
+			fields = append(fields, zap.String("remote_addr", r.RemoteAddr))
 			// trace_id/span_id join this line to the trace. Appended, not in the
 			// literal above, because they are absent when tracing is off and a
-			// nil-valued field pair would be noise on every line. No personal
-			// identity here: diagnostic access logs carry correlation ids and
-			// bounded request facts only — identity belongs in audit events
-			// (S13.2 / review P0-5).
-			log.Info("request", append(fields, logging.TraceFields(r.Context())...)...)
+			// nil-valued field pair would be noise on every line.
+			ce.Write(append(fields, logging.TraceFields(r.Context())...)...)
 		})
 	}
+}
+
+// requestFacts carries what the request line learns from further down the
+// stack. Authentication runs per route, INSIDE requestLogger, so the subject
+// it puts on the context is invisible to requestLogger's own context; the
+// route records it here instead (recordSubject).
+type requestFacts struct{ userID string }
+
+type requestFactsKey struct{}
+
+// recordSubject notes the authenticated caller for the request line. It runs
+// right after the route's Authenticate middleware.
+func recordSubject(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f, ok := r.Context().Value(requestFactsKey{}).(*requestFacts); ok {
+			if sub, ok := identity.From(r.Context()); ok {
+				f.userID = sub.ID
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isOpsPath reports the operational endpoints NewRouter mounts itself.
+func isOpsPath(p string) bool {
+	return p == "/healthz/live" || p == "/healthz/ready" || p == "/metrics"
+}
+
+// durationMS is d in milliseconds, rounded to 0.1 ms.
+func durationMS(d time.Duration) float64 {
+	return math.Round(float64(d)/float64(time.Millisecond)*10) / 10
 }
 
 // contextLogger stamps a request-scoped logger onto the context, bound to the
 // request id and the trace/span ids, so a handler that logs via
 // logging.From(ctx) produces a line already joined to the request and its
-// trace. It deliberately carries NO user identity — see requestLogger.
+// trace. It carries no user identity: authentication has not run yet.
 func contextLogger(base *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

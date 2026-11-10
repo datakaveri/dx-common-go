@@ -70,7 +70,9 @@ func (p *Publisher) Publish(rec *Record) {
 		return
 	}
 	if err := p.pub.PublishJSON(p.exchange, p.routingKey, rec); err != nil {
-		p.logger.Error("audit publish failed",
+		// WARN: the request already succeeded and the broker connection
+		// reports its own outage; this line names the record that was lost.
+		p.logger.Warn("audit publish failed",
 			zap.String("action", rec.Action),
 			zap.String("api", rec.API),
 			zap.Error(err))
@@ -85,7 +87,7 @@ func (p *Publisher) PublishEvent(ev *GatewayEvent) {
 		return
 	}
 	if err := p.pub.PublishJSON(p.exchange, p.routingKey, ev); err != nil {
-		p.logger.Error("gateway event publish failed",
+		p.logger.Warn("gateway event publish failed",
 			zap.String("event", ev.Event), zap.Error(err))
 	}
 }
