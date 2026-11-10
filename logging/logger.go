@@ -38,6 +38,9 @@ func New(cfg Config) (*zap.Logger, error) {
 	// their log shape as little as possible.
 	zcfg.EncoderConfig.TimeKey = "time"
 	zcfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	// Stack traces on panics only, not on every ERROR — see
+	// platform/bootstrap's newLogger.
+	zcfg.DisableStacktrace = true
 
 	// S13.2 backstop: strip/mask known secret and credential fields before
 	// they reach the encoder, regardless of what a call site logs. Wrapped
@@ -45,7 +48,7 @@ func New(cfg Config) (*zap.Logger, error) {
 	// logger (and everything derived from it via .With/.Named) ever writes.
 	logger, err := zcfg.Build(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
 		return NewRedactingCore(core)
-	}))
+	}), zap.AddStacktrace(zapcore.DPanicLevel))
 	if err != nil {
 		return nil, fmt.Errorf("logging.New: build zap logger: %w", err)
 	}

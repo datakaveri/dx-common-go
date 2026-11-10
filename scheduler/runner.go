@@ -2,13 +2,17 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
+
+	"github.com/datakaveri/dx-common-go/logging"
 )
 
 // Option configures a Runner at construction time. None are defined yet;
@@ -157,9 +161,31 @@ func (r *Runner) runOnce(ctx context.Context, rj *registeredJob) {
 	durationSeconds.WithLabelValues(rj.job.Name).Observe(duration.Seconds())
 	if err != nil {
 		failuresTotal.WithLabelValues(rj.job.Name).Inc()
-		r.logger.Error("scheduler: job failed",
-			zap.String("job", rj.job.Name), zap.Duration("duration", duration), zap.Error(err))
+		fields := []zap.Field{zap.String("job", rj.job.Name), zap.Int64("duration_ms", duration.Milliseconds())}
+		var pe *panicError
+		switch {
+		case errors.As(err, &pe):
+			r.logger.Error("scheduler: job panicked",
+				append(fields, zap.Any("panic", pe.value), zap.ByteString("stack", pe.stack))...)
+		case logging.IsDependencyFailure(err):
+			// A dependency being down is retried by the next tick; WARN, so a
+			// minute-by-minute job does not page anyone for an outage elsewhere.
+			r.logger.Warn("scheduler: job failed: dependency unavailable", append(fields, logging.ErrorFields(err)...)...)
+		default:
+			r.logger.Error("scheduler: job failed", append(fields, logging.ErrorFields(err)...)...)
+		}
 	}
+}
+
+// panicError is a recovered job panic, carrying the stack of the panic site.
+type panicError struct {
+	job   string
+	value any
+	stack []byte
+}
+
+func (e *panicError) Error() string {
+	return fmt.Sprintf("scheduler: job %q panicked: %v", e.job, e.value)
 }
 
 // runProtected calls job.Run, converting a panic into an error so one
@@ -167,7 +193,7 @@ func (r *Runner) runOnce(ctx context.Context, rj *registeredJob) {
 func runProtected(ctx context.Context, job Job) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			err = fmt.Errorf("scheduler: job %q panicked: %v", job.Name, p)
+			err = &panicError{job: job.Name, value: p, stack: debug.Stack()}
 		}
 	}()
 	return job.Run(ctx)

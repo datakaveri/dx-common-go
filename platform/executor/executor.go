@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 
 	"go.uber.org/zap"
@@ -133,7 +134,7 @@ func (e *Executor) spawn(name string, fn func(context.Context)) error {
 			// an outage for every session on the replica.
 			if r := recover(); r != nil {
 				e.log.Error("panic in background task",
-					zap.String("task", name), zap.Any("panic", r))
+					zap.String("task", name), zap.Any("panic", r), zap.ByteString("stack", debug.Stack()))
 			}
 		}()
 		fn(e.ctx)

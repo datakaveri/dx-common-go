@@ -27,3 +27,15 @@ func From(ctx context.Context) *zap.Logger {
 	}
 	return zap.NewNop()
 }
+
+// FromOr returns the logger stored by Into, or fallback when none is set.
+//
+// Service code that runs both inside a request and outside one (a scheduled
+// job, a queue consumer) uses it with its own logger as the fallback: inside a
+// request the line carries request_id and trace_id, outside it still logs.
+func FromOr(ctx context.Context, fallback *zap.Logger) *zap.Logger {
+	if l, ok := ctx.Value(ctxKey{}).(*zap.Logger); ok {
+		return l
+	}
+	return fallback
+}

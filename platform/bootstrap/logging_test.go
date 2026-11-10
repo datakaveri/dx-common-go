@@ -44,3 +44,25 @@ func TestNewLoggerRedactsProhibitedFields(t *testing.T) {
 	assert.NotContains(t, got, "authorization", "the prohibited key itself must not reach the encoded line")
 	assert.Contains(t, got, "/policies", "a non-prohibited field must still be logged")
 }
+
+// An ERROR line is one line. zap's production default attached a full stack
+// trace to every ERROR, so one expected "dependency down" became ~80 lines.
+func TestNewLoggerPutsNoStackOnErrors(t *testing.T) {
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stderr
+	os.Stderr = w
+
+	logger, buildErr := newLogger("info", logFormatJSON, "svc", "v1")
+	require.NoError(t, buildErr)
+	logger.Error("request failed", zap.String("dependency", "apis.user"))
+	_ = logger.Sync()
+
+	os.Stderr = orig
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(out), "request failed")
+	assert.NotContains(t, string(out), `"stacktrace"`, "ERROR lines must not carry a stack trace")
+}
