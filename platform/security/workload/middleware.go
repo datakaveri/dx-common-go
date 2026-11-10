@@ -1,0 +1,154 @@
+package workload
+
+import (
+	"net/http"
+
+	dxerrors "github.com/datakaveri/dx-common-go/errors"
+	dxheaders "github.com/datakaveri/dx-common-go/transport/headers"
+)
+
+// Middleware establishes the calling workload and constrains what it may claim.
+//
+// It must run BEFORE subject resolution. The decision "may this caller speak
+// for a user at all" gates whether the X-Subject-* headers can be trusted, so
+// resolving the subject first would mean trusting them to decide whether to
+// trust them.
+//
+// A nil Verifier is the Disabled case and passes everything through unchanged,
+// which is what keeps this additive for the fleet.
+func Middleware(v *Verifier) func(http.Handler) http.Handler {
+	if v == nil {
+		return passthrough
+	}
+	mode := v.enforcement
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := bearerToken(r.Header.Get(HdrWorkload))
+
+			if raw == "" {
+				// No fallback. This is the line that closes C-02 (ROADMAP
+				// P0-17): while a request with no workload credential could
+				// still proceed on the legacy HMAC path, an attacker holding
+				// the shared secret simply omitted the token, and every
+				// verifier in the fleet accepted it. There is nothing to fall
+				// back to now.
+				record(resultMissing, "", mode)
+				dxerrors.WriteError(w, dxerrors.NewUnauthorized("workload credential required"))
+				return
+			}
+
+			p, err := v.Verify(raw)
+			if err != nil {
+				// A credential that is present and invalid is fatal. This used
+				// to need saying because Permissive existed and falling through
+				// here would have let a caller downgrade out of a failed check
+				// by sending a deliberately broken token. With the fallback gone
+				// there is nowhere to fall through TO — but the test that pins
+				// it stays, because the property is what matters, not the reason
+				// it was once at risk.
+				record(resultRejected, "", mode)
+				dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid workload credential"))
+				return
+			}
+
+			if assertsSubject(r.Header) && !v.MayAssertSubject(p) {
+				record(resultSubjectDenied, p.ID, mode)
+				dxerrors.WriteError(w, dxerrors.NewForbidden("this workload may not assert an end-user subject"))
+				return
+			}
+
+			record(resultVerified, p.ID, mode)
+			next.ServeHTTP(w, r.WithContext(With(r.Context(), p)))
+		})
+	}
+}
+
+// MiddlewareOptional verifies a workload credential when one is PRESENT and
+// passes the request through untouched when it is absent.
+//
+// It exists for exactly one kind of surface: an edge that serves end users AND
+// receives service-to-service traffic on the same listener — dx-gateway-go,
+// which browsers call with no workload credential and dx-mcp-gateway-go calls
+// back into with one. Middleware cannot be used there: it rejects every request
+// without a credential, which would 401 every end user.
+//
+// It is NOT the removed `permissive` mode. Permissive let a request with no
+// credential carry ASSERTED SUBJECT HEADERS on to the resolver; this does not
+// establish any principal for an absent credential, so anything downstream that
+// requires one (RequireCaller, the gateway's agent hop check, the subject-header
+// resolver) still fails closed. Absence buys nothing; only a verified
+// credential produces a principal.
+//
+// A credential that is present and invalid is rejected outright — never
+// downgraded to "absent" — so a caller cannot escape a failed check by sending
+// a deliberately broken token.
+//
+// A nil Verifier passes everything through, like Middleware.
+func MiddlewareOptional(v *Verifier) func(http.Handler) http.Handler {
+	if v == nil {
+		return passthrough
+	}
+	mode := v.enforcement
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := bearerToken(r.Header.Get(HdrWorkload))
+			if raw == "" {
+				record(resultAbsent, "", mode)
+				next.ServeHTTP(w, r)
+				return
+			}
+			p, err := v.Verify(raw)
+			if err != nil {
+				record(resultRejected, "", mode)
+				dxerrors.WriteError(w, dxerrors.NewUnauthorized("invalid workload credential"))
+				return
+			}
+			if assertsSubject(r.Header) && !v.MayAssertSubject(p) {
+				record(resultSubjectDenied, p.ID, mode)
+				dxerrors.WriteError(w, dxerrors.NewForbidden("this workload may not assert an end-user subject"))
+				return
+			}
+			record(resultVerified, p.ID, mode)
+			next.ServeHTTP(w, r.WithContext(With(r.Context(), p)))
+		})
+	}
+}
+
+// RequireCaller rejects any request whose verified workload is not one of ids.
+//
+// This is the replacement for auth/resolver.RequireGatewayOrigin, which could
+// only ever prove that SOMEBODY holding the shared secret called. Here the
+// identity is cryptographic and specific.
+//
+// It fails closed when no workload was verified. That used to carry a caveat —
+// "only correct on a service whose Middleware runs with enforcement enabled" —
+// which no longer applies: a verifier either enforces or does not exist
+// (ROADMAP P0-17), so there is no configuration in which this guard is installed
+// behind a switched-off control.
+func RequireCaller(ids ...string) func(http.Handler) http.Handler {
+	allowed := set(ids)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p, ok := From(r.Context())
+			if !ok {
+				dxerrors.WriteError(w, dxerrors.NewForbidden("this endpoint requires a verified workload caller"))
+				return
+			}
+			if _, permitted := allowed[p.ID]; !permitted {
+				dxerrors.WriteError(w, dxerrors.NewForbidden("workload "+p.ID+" may not call this endpoint"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// assertsSubject reports whether the request claims to speak for an end user.
+//
+// It keys off the subject id rather than the signature, because the question is
+// "is this request carrying a user identity", not "is that identity signed" —
+// the HMAC signature is gone (P0-17 stage 2) but the subject headers remain.
+func assertsSubject(h http.Header) bool {
+	return h.Get(dxheaders.HdrSubjectID) != ""
+}

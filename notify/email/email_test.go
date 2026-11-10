@@ -100,7 +100,7 @@ func TestNotifier_ValidationErrors(t *testing.T) {
 	cases := []Request{
 		{TemplateType: TemplateTypePath, TemplateStructure: "x", IsCreated: true}, // no consumer
 		{ConsumerUserID: "u", TemplateType: "BOGUS", TemplateStructure: "x"},      // bad type
-		{ConsumerUserID: "u", TemplateType: TemplateTypePath},                      // no structure
+		{ConsumerUserID: "u", TemplateType: TemplateTypePath},                     // no structure
 	}
 	for i, req := range cases {
 		if err := n.Send(context.Background(), req); err == nil {
@@ -117,5 +117,28 @@ func TestNotifier_PublishErrorPropagates(t *testing.T) {
 	n := NewNotifier(Config{Enabled: true}, pub, nil)
 	if err := n.Send(context.Background(), validReq()); err == nil {
 		t.Fatal("expected publish error to propagate")
+	}
+}
+
+// Subject is Go-only and optional (F39 delegations, Ankit 2026-11-03): sent
+// when set, left out otherwise so the Java EmailRequest payload is unchanged.
+// Java's EmailRequest.fromJson ignores fields it does not know.
+func TestNotifier_SubjectOptional(t *testing.T) {
+	for _, tc := range []struct {
+		subject string
+		want    bool
+	}{{"Delegation Access Granted", true}, {"", false}} {
+		pub := &capturePublisher{}
+		req := validReq()
+		req.Subject = tc.subject
+		if err := NewNotifier(Config{Enabled: true}, pub, nil).Send(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(pub.payload)
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		if got, ok := m["subject"]; ok != tc.want || (ok && got != tc.subject) {
+			t.Fatalf("subject %q: payload %s", tc.subject, b)
+		}
 	}
 }

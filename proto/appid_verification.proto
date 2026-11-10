@@ -43,6 +43,8 @@ message CheckItemAccessResponse {
   string access_policy        = 4;
   string resource_server_json = 5;  // JSON-encoded resourceServer array
   string policies_json        = 6;  // JSON-encoded policies array
+  bool   has_owner_access     = 7;  // caller is the item owner — full access, no policy needed
+  bool   has_admin_access     = 8;  // caller is an admin — full access, no policy needed
 }
 
 // ── ResolveDelegation ──────────────────────────────────────────────────────

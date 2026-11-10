@@ -27,4 +27,28 @@ type DxUser struct {
 	DelegatorID string
 	// Scopes contains delegation scope entries from the token.
 	Scopes []DelegationScopeEntry
+	// AgentSubject is populated when the request runs under a delegated token
+	// (RFC 8693 act claim): ID stays the human user, AgentSubject names the
+	// agent acting on their behalf.
+	AgentSubject string
+	// DelegationID references the delegation grant that authorized the
+	// delegated token. Empty on direct user requests.
+	DelegationID string
+	// AppID is set when the caller authenticated with an application
+	// credential (Basic appId:appSecret): ID is then the app's owner and Scopes
+	// the app's scopes (Java AppId principal: sub, app_id, scopes).
+	AppID string
+	// DelegateeID is set when the request named a delegator in the `did`
+	// header and the gateway resolved that delegation (Java Bearer/Basic +
+	// did → ResolveDelegation, F58-r): ID, Roles, organisation, Email and Name
+	// are then the DELEGATOR's, Scopes the delegation's capped scopes, and
+	// DelegateeID the authenticated caller (Java claim delegatee_sub). AppID
+	// stays set when that caller is an application credential (Basic + did).
+	DelegateeID string
+}
+
+// IsAgent reports whether the request is being made by an agent acting on the
+// user's behalf rather than by the user directly.
+func (u DxUser) IsAgent() bool {
+	return u.AgentSubject != ""
 }

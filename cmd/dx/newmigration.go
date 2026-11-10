@@ -89,8 +89,8 @@ func slugify(name string) string {
 }
 
 func writeIfAbsent(path, contents string) error {
-	if _, err := os.Stat(path); err == nil {
+	if _, err := os.Stat(path); err == nil { //nolint:gosec // G703: path is built from a slugified name ([^a-z0-9]+ -> _), so no traversal survives
 		return fmt.Errorf("%s already exists", path)
 	}
-	return os.WriteFile(path, []byte(contents), 0o644)
+	return os.WriteFile(path, []byte(contents), 0o644) //nolint:gosec // G306: generated migration SOURCE, committed to the repo; 0644 is correct
 }

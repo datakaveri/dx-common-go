@@ -3,8 +3,11 @@ package middleware
 import (
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+
+	"github.com/datakaveri/dx-common-go/transport/clientip"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 )
@@ -39,6 +42,12 @@ func Standard(logger *zap.Logger, timeout time.Duration, opts ...Option) func(ch
 			r.Use(otelhttp.NewMiddleware("http.server"))
 		}
 		r.Use(RequestID())
+		// Capture BEFORE RealIP: RealIP overwrites RemoteAddr from a
+		// client-supplied header, and transport/clientip needs the real
+		// transport peer as its fallback or that fallback is forgeable too
+		// (ROADMAP P1-4).
+		r.Use(clientip.Capture)
+		//nolint:staticcheck // SA1019: deprecated for the spoofing described above; its output is for LOGS, not decisions — use transport/clientip for those
 		r.Use(chimw.RealIP)
 		r.Use(Logger(logger))
 		r.Use(CORS(DefaultCORSConfig()))
@@ -46,4 +55,33 @@ func Standard(logger *zap.Logger, timeout time.Duration, opts ...Option) func(ch
 		r.Use(chimw.Recoverer)
 		r.Use(chimw.Timeout(timeout))
 	}
+}
+
+// Gin is the gin equivalent of Standard, applying the same optional-tracing
+// stack via Wrap. Use r.Use(Gin(logger, timeout, opts...)...) on a gin.Engine.
+func Gin(logger *zap.Logger, timeout time.Duration, opts ...Option) []gin.HandlerFunc {
+	cfg := &standardConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	stack := make([]gin.HandlerFunc, 0, 7)
+	if cfg.tracing {
+		stack = append(stack, Wrap(otelhttp.NewMiddleware("http.server")))
+	}
+	stack = append(stack,
+		Wrap(RequestID()),
+		// Capture BEFORE RealIP: RealIP overwrites RemoteAddr from a
+		// client-supplied header, and transport/clientip needs the real
+		// transport peer as its fallback or that fallback is forgeable too
+		// (ROADMAP P1-4).
+		Wrap(clientip.Capture),
+		//nolint:staticcheck // SA1019: deprecated for the spoofing described above; its output is for LOGS, not decisions — use transport/clientip for those
+		Wrap(chimw.RealIP),
+		Wrap(Logger(logger)),
+		Wrap(CORS(DefaultCORSConfig())),
+		Wrap(Compression()),
+		Wrap(chimw.Recoverer),
+		Wrap(chimw.Timeout(timeout)),
+	)
+	return stack
 }

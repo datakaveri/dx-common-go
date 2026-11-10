@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/datakaveri/dx-common-go/logging"
 )
 
 // responseWriter is a minimal wrapper that captures the status code written by
@@ -26,6 +28,17 @@ func (rw *responseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush passes through, so a streaming response (SSE) wrapped by the access
+// log is still delivered event by event rather than held in a buffer.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying writer to http.ResponseController.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
 // Logger returns a chi-compatible middleware that logs each request using zap.
 // Fields logged: method, path, status code, response time, bytes, requestID.
 func Logger(logger *zap.Logger) func(http.Handler) http.Handler {
@@ -36,7 +49,7 @@ func Logger(logger *zap.Logger) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(rw, r)
 
-			logger.Info("request",
+			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Int("status", rw.status),
@@ -44,7 +57,11 @@ func Logger(logger *zap.Logger) func(http.Handler) http.Handler {
 				zap.Int("bytes", rw.bytes),
 				zap.String("request_id", RequestIDFromCtx(r.Context())),
 				zap.String("remote_addr", r.RemoteAddr),
-			)
+			}
+			// trace_id/span_id join this line to the trace; appended so they are
+			// absent (not empty) when tracing is off. No personal identity here
+			// (S13.2 / review P0-5).
+			logger.Info("request", append(fields, logging.TraceFields(r.Context())...)...)
 		})
 	}
 }

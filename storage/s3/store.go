@@ -58,6 +58,11 @@ type Reader interface {
 	// ListObjects lists objects under prefix. By default it recurses; pass
 	// WithDelimiter("/") for a single hierarchy level.
 	ListObjects(ctx context.Context, prefix string, opts ...ListOption) ([]ObjectInfo, error)
+	// ListLevel lists ONE hierarchy level under prefix: the objects directly
+	// beneath it and the sub-prefixes ("folders") delimiter groups them into.
+	// ListObjects with WithDelimiter returns only the former, which is enough
+	// to page files but not to render a folder tree.
+	ListLevel(ctx context.Context, prefix, delimiter string) ([]ObjectInfo, []string, error)
 }
 
 // Writer is the write side of an object store.

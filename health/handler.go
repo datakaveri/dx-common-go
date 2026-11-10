@@ -70,9 +70,10 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 
 	// Set status code based on overall health
 	statusCode := http.StatusOK
-	if status.Status == "unhealthy" {
+	switch status.Status {
+	case "unhealthy":
 		statusCode = http.StatusServiceUnavailable
-	} else if status.Status == "degraded" {
+	case "degraded":
 		statusCode = http.StatusOK // Still return 200 for degraded
 	}
 

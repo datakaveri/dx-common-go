@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+// Package dx.apis.catalogue.v1 is the shared item contract.
+//
+// ONE CONTRACT, TWO SERVERS. This file is kept byte-for-byte identical in
+// dx-common-go/apis/proto and in the Java dx-common (src/main/proto). The Java
+// controlplane and dx-catalogue-go both serve it, so a caller moves between
+// them by changing an address in config, never its code.
+//
+// Additive: org.cdpg.dx.cat.item.v1.CatItemService (an end user's view of an
+// item, with access checks) and dx.catalogue.v1.CatalogueService are separate
+// contracts and are not changed by this one.
+//
+// Auth (both servers): metadata "authorization: Bearer <Keycloak
+// service-account token>"; the token's azp must be on the server's allowlist.
+// Errors are gRPC status codes, never fields in a response.
+package dx.apis.catalogue.v1;
+
+option go_package           = "github.com/datakaveri/dx-common-go/apis/catalogue/v1;cataloguev1";
+option java_multiple_files  = true;
+option java_package         = "org.cdpg.dx.apis.catalogue.v1";
+option java_outer_classname = "ItemProto";
+
+// ItemService serves catalogue items to trusted platform services.
+service ItemService {
+  // GetItem returns one item by id. It applies no end-user visibility rules:
+  // the caller is a service and enforces its own (e.g. ownership).
+  //
+  // Errors: INVALID_ARGUMENT (item_id empty or not a UUID),
+  //         NOT_FOUND (no such item), UNAUTHENTICATED, PERMISSION_DENIED.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+}
+
+message GetItemRequest {
+  string item_id = 1; // catalogue item UUID
+}
+
+message GetItemResponse {
+  // The stored catalogue document, JSON-encoded: the same object
+  // GET /cat/item?id=<item_id> returns as results[0].
+  string item_json = 1;
+}

@@ -15,6 +15,9 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// workloadMD is workload.HdrWorkload as gRPC metadata (lowercase).
+const workloadMD = "x-dx-workload"
+
 // Client wraps the controlplane AppIdVerificationService. Safe for concurrent
 // use; create one per service and share it.
 type Client struct {
@@ -23,8 +26,22 @@ type Client struct {
 	stub   appidpb.AppIdVerificationServiceClient
 	tokens *tokenSource
 
+	// workload mints the platform workload credential in workload mode
+	// (cfg.WorkloadDestination set); nil uses the Keycloak bearer.
+	workload WorkloadTokens
+
 	mu    sync.RWMutex
-	cache map[string]verifyEntry // key: sha256(appID:secret)
+	cache map[string]verifyEntry         // key: sha256(appID:secret)
+	byApp map[string]map[string]struct{} // appID → its cache keys, for Invalidate
+
+	// delegations caches ResolveDelegation successes (delegation.go, F58-r).
+	delegations *delegationCache
+}
+
+// WorkloadTokens mints a workload credential for a destination
+// (*issuer.Source does).
+type WorkloadTokens interface {
+	TokenFor(ctx context.Context, destination string) (string, error)
 }
 
 type verifyEntry struct {
@@ -53,7 +70,28 @@ func NewClient(cfg Config) (*Client, error) {
 		stub:   appidpb.NewAppIdVerificationServiceClient(conn),
 		tokens: newTokenSource(cfg),
 		cache:  make(map[string]verifyEntry),
+		byApp:  make(map[string]map[string]struct{}),
+
+		delegations: &delegationCache{now: time.Now},
 	}, nil
+}
+
+// WithWorkload sets the workload credential source used in workload mode.
+func (c *Client) WithWorkload(w WorkloadTokens) *Client {
+	c.workload = w
+	return c
+}
+
+// Invalidate drops every cached verification of appID — the revocation hook
+// (Java AppIdRevocationConsumer: a revoked app is refused on its next call,
+// not when its cache entry expires).
+func (c *Client) Invalidate(appID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key := range c.byApp[appID] {
+		delete(c.cache, key)
+	}
+	delete(c.byApp, appID)
 }
 
 // Close releases the underlying gRPC connection.
@@ -61,6 +99,17 @@ func (c *Client) Close() error { return c.conn.Close() }
 
 // authCtx attaches the service bearer token and a call deadline.
 func (c *Client) authCtx(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if c.cfg.WorkloadDestination != "" {
+		if c.workload == nil {
+			return nil, nil, fmt.Errorf("workload mode without a workload credential source")
+		}
+		token, err := c.workload.TokenFor(ctx, c.cfg.WorkloadDestination)
+		if err != nil {
+			return nil, nil, err
+		}
+		ctx, cancel := context.WithTimeout(ctx, c.cfg.callTimeout())
+		return metadata.AppendToOutgoingContext(ctx, workloadMD, "Bearer "+token), cancel, nil
+	}
 	token, err := c.tokens.Token(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -106,6 +155,7 @@ func (c *Client) VerifyAppId(ctx context.Context, appID, appSecret string) (auth
 	}
 	user := auth.DxUser{
 		ID:             p.GetUserId(),
+		AppID:          appID,
 		Roles:          p.GetRoles(),
 		OrganisationID: p.GetOrganisationId(),
 		Scopes:         scopes,
@@ -120,6 +170,10 @@ func (c *Client) VerifyAppId(ctx context.Context, appID, appSecret string) (auth
 	if ttl > 0 {
 		c.mu.Lock()
 		c.cache[key] = verifyEntry{user: user, expiresAt: time.Now().Add(ttl)}
+		if c.byApp[appID] == nil {
+			c.byApp[appID] = make(map[string]struct{})
+		}
+		c.byApp[appID][key] = struct{}{}
 		c.mu.Unlock()
 	}
 

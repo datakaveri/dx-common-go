@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+// Package dx.catalogue.v1 is the catalogue's internal contract.
+//
+// This is the FIRST Go-owned gRPC contract in the platform. It deliberately
+// does not extend org.cdpg.dx.auth.appid.v1 (grpc/appidpb), which is the JAVA
+// control plane's AppIdVerificationService — that service bundles four
+// unrelated jobs (VerifyAppId and ResolveDelegation are identity, CheckItemAccess
+// is an authorization decision, GetItem is this) and is being removed.
+package dx.catalogue.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/cataloguepb;cataloguepb";
+
+// CatalogueService serves item metadata to other platform services.
+//
+// Internal only. External catalogue access goes through the gateway to
+// dx-catalogue-go's REST surface; this exists so services do not have to.
+service CatalogueService {
+  // GetItem returns one item by id.
+  //
+  // The SUBJECT is not a field: it travels as signed X-Subject-* metadata and
+  // is verified by the platform interceptor, exactly as on the HTTP path. A
+  // caller-supplied user id in the message body would be an unauthenticated
+  // claim, which is the class of defect ADR-06 exists to remove.
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+
+  // GetItemAccessInfo returns an item's access record for the platform's
+  // decision point (dx-authz-go), whoever the end user is.
+  //
+  // Unlike GetItem it applies NO subject visibility: the PDP needs the owner,
+  // organisation and access policy of a PRIVATE item precisely to decide that
+  // a non-owner may not read it, and a lookup filtered by the same rule would
+  // answer "not found" before the decision is made. That makes this RPC more
+  // powerful than GetItem, so the catalogue serves it only to the workloads it
+  // lists as access-info callers (default: the PDP alone).
+  rpc GetItemAccessInfo(GetItemAccessInfoRequest) returns (GetItemAccessInfoResponse);
+
+  // GetItemWithAccess is the catalogue's HTTP GET /iudx/v2/cat/item/access
+  // (Java getItemWithAccessChecks) over gRPC: the same service call, so the
+  // same access checks for the SUBJECT — PRIVATE needs ownership;
+  // RESTRICTED/PII need ownership, a delegator who owns the item, or a policy
+  // granted by dx-acl-go /verify — and the same answer.
+  //
+  // dx-dataplane-rs-go calls it per data request, as Java dx-dataplane-rs
+  // calls the HTTP route: it needs the item's NGSI-LD queryTypes and its
+  // organisation for the data-access audit (F58-k/h).
+  //
+  // Errors carry the HTTP route's status as the matching code (NotFound,
+  // PermissionDenied, Unauthenticated, InvalidArgument, Internal) with the
+  // same message.
+  rpc GetItemWithAccess(GetItemWithAccessRequest) returns (GetItemWithAccessResponse);
+}
+
+message GetItemRequest {
+  // Item id (UUID).
+  string item_id = 1;
+}
+
+message GetItemResponse {
+  // False when no item exists for the id. Callers must check it: a zero-valued
+  // Item is not the same as a missing one.
+  bool found = 1;
+
+  Item item = 2;
+}
+
+message GetItemAccessInfoRequest {
+  // Item id (UUID).
+  string item_id = 1;
+}
+
+message GetItemAccessInfoResponse {
+  // False when no item exists for the id — a normal answer, not an error.
+  bool found = 1;
+
+  Item item = 2;
+}
+
+message GetItemWithAccessRequest {
+  // Item id (UUID).
+  string item_id = 1;
+  // is_delegator and did are the HTTP route's isDelegator and did query
+  // parameters (Java GET /item/access): the caller acts for the delegator
+  // did, which must be given, and the delegation between them must allow the
+  // item before did takes part in the access checks.
+  bool is_delegator = 2;
+  string did = 3;
+}
+
+message GetItemWithAccessResponse {
+  // The item document exactly as HTTP /item/access returns it in result[0],
+  // JSON-encoded: the whole catalogue document plus hasOwnerAccess,
+  // hasAdminAccess and, for a RESTRICTED/PII item granted by policy,
+  // policies. It is the whole document on purpose, unlike Item: the HTTP
+  // route returns the whole document, and this RPC must answer the same.
+  bytes item_json = 1;
+}
+
+// Item is the subset of a catalogue document other services consume. It is
+// deliberately NOT the whole document: a contract that mirrors the storage
+// shape makes every catalogue field an API commitment.
+message Item {
+  string id = 1;
+  // Item type, e.g. DATABANK.
+  string type = 2;
+  string name = 3;
+  string description = 4;
+  // The owning provider's user id (UUID).
+  string owner_user_id = 5;
+  string organization_id = 6;
+  string organization_name = 7;
+  string access_policy = 8;
+}

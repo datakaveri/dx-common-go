@@ -17,8 +17,8 @@ func TestNewWithSQL_AccessorAndEmbeddedCRUD(t *testing.T) {
 	if repo.SQL() != q {
 		t.Fatalf("SQL() = %+v, want %+v", repo.SQL(), q)
 	}
-	if repo.Base.dao.TableName != "widgets" {
-		t.Fatalf("embedded Base's TableName = %q, want %q", repo.Base.dao.TableName, "widgets")
+	if repo.dao.TableName != "widgets" {
+		t.Fatalf("embedded Base's TableName = %q, want %q", repo.dao.TableName, "widgets")
 	}
 
 	// Embedded *Base[R]'s CRUD path is reachable without panicking on

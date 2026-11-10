@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/datakaveri/dx-common-go/pagination"
+	"github.com/datakaveri/dx-common-go/platform/paging"
 )
 
 func decode(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
@@ -58,7 +58,7 @@ func TestServiceWriter_PerServiceURN(t *testing.T) {
 func TestServiceWriter_PaginatedInfo(t *testing.T) {
 	sw := NewServiceWriter("urn:dx:community:")
 	w := httptest.NewRecorder()
-	sw.PaginatedInfo(w, []int{1, 2, 3}, pagination.NewInfo(2, 10, 25), "OK", "page")
+	sw.PaginatedInfo(w, []int{1, 2, 3}, paging.NewInfo(2, 10, 25), "OK", "page")
 
 	m := decode(t, w)
 	pi, ok := m["paginationInfo"].(map[string]any)

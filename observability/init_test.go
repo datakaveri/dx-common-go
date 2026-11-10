@@ -3,7 +3,10 @@ package observability
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // TestInit_NoOpWithoutEndpoint pins the safe-by-default contract: with no
@@ -43,4 +46,74 @@ func TestInit_SecondCallIsNoOp(t *testing.T) {
 	if err := shutdown(context.Background()); err != nil {
 		t.Fatalf("second call's shutdown returned error: %v", err)
 	}
+}
+
+// TestNewSampler pins the head-sampling policy: an unset or out-of-range ratio
+// records everything (the pilot default that lets the Collector tail keep all
+// errors), and only a fraction strictly inside (0,1) enables ratio sampling.
+func TestNewSampler(t *testing.T) {
+	tests := []struct {
+		name       string
+		ratio      float64
+		wantSubstr string
+	}{
+		{"zero samples all", 0, "AlwaysOnSampler"},
+		{"negative samples all", -0.5, "AlwaysOnSampler"},
+		{"one samples all", 1, "AlwaysOnSampler"},
+		{"above one samples all", 2, "AlwaysOnSampler"},
+		{"fraction is ratio based", 0.1, "TraceIDRatioBased"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newSampler(Config{SampleRatio: tt.ratio}).Description()
+			if !strings.Contains(got, tt.wantSubstr) {
+				t.Errorf("newSampler(%v).Description() = %q, want it to contain %q", tt.ratio, got, tt.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestNewResource pins that service identity reaches the resource and that an
+// empty Version/Environment is omitted rather than reported as "".
+func TestNewResource(t *testing.T) {
+	t.Run("attributes present when set", func(t *testing.T) {
+		res, err := newResource(context.Background(), Config{
+			ServiceName: "dx-acl-go", Version: "1.2.3", Environment: "staging",
+		})
+		if err != nil {
+			t.Fatalf("newResource: %v", err)
+		}
+		attrs := resourceAttrs(res.Attributes())
+		for k, want := range map[string]string{
+			"service.name":                "dx-acl-go",
+			"service.version":             "1.2.3",
+			"deployment.environment.name": "staging",
+		} {
+			if got := attrs[k]; got != want {
+				t.Errorf("resource[%q] = %q, want %q", k, got, want)
+			}
+		}
+	})
+
+	t.Run("empty optional attributes omitted", func(t *testing.T) {
+		res, err := newResource(context.Background(), Config{ServiceName: "dx-acl-go"})
+		if err != nil {
+			t.Fatalf("newResource: %v", err)
+		}
+		attrs := resourceAttrs(res.Attributes())
+		if _, ok := attrs["service.version"]; ok {
+			t.Error("service.version should be absent when Version is empty")
+		}
+		if _, ok := attrs["deployment.environment.name"]; ok {
+			t.Error("deployment.environment.name should be absent when Environment is empty")
+		}
+	})
+}
+
+func resourceAttrs(kvs []attribute.KeyValue) map[string]string {
+	out := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		out[string(kv.Key)] = kv.Value.AsString()
+	}
+	return out
 }

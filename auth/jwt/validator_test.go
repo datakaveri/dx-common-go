@@ -25,8 +25,8 @@ func jwksServer(t *testing.T) (*httptest.Server, *rsa.PrivateKey) {
 		t.Fatalf("genkey: %v", err)
 	}
 	b64 := base64.RawURLEncoding
-	n := b64.EncodeToString(key.PublicKey.N.Bytes())
-	e := b64.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes())
+	n := b64.EncodeToString(key.N.Bytes())
+	e := b64.EncodeToString(big.NewInt(int64(key.E)).Bytes())
 	jwks := map[string]any{
 		"keys": []map[string]any{{
 			"kty": "RSA", "use": "sig", "alg": "RS256", "kid": testKID, "n": n, "e": e,
@@ -101,6 +101,50 @@ func TestValidate_RejectsExpired(t *testing.T) {
 	c["exp"] = time.Now().Add(-time.Hour).Unix()
 	if _, err := v.Validate(sign(t, key, gojwt.SigningMethodRS256, testKID, c)); err == nil {
 		t.Fatal("expected expired token to be rejected")
+	}
+}
+
+func TestValidate_SkipExpiryCheck(t *testing.T) {
+	srv, key := jwksServer(t)
+	v, err := New(Config{
+		JwksURL:         srv.URL,
+		Issuer:          "https://kc/realms/iudx",
+		Audience:        "account",
+		SkipExpiryCheck: true,
+	})
+	if err != nil {
+		t.Fatalf("New validator: %v", err)
+	}
+
+	expired := baseClaims()
+	expired["iat"] = time.Now().Add(-2 * time.Hour).Unix()
+	expired["exp"] = time.Now().Add(-time.Hour).Unix()
+	if _, err := v.Validate(sign(t, key, gojwt.SigningMethodRS256, testKID, expired)); err != nil {
+		t.Fatalf("expired token rejected with skip_expiry_check: %v", err)
+	}
+
+	// Everything but exp is still enforced.
+	wrongIss := baseClaims()
+	wrongIss["exp"] = time.Now().Add(-time.Hour).Unix()
+	wrongIss["iss"] = "https://evil/realms/iudx"
+	if _, err := v.Validate(sign(t, key, gojwt.SigningMethodRS256, testKID, wrongIss)); err == nil {
+		t.Fatal("expected wrong-issuer token to be rejected")
+	}
+	wrongAud := baseClaims()
+	wrongAud["aud"] = "some-other-client"
+	if _, err := v.Validate(sign(t, key, gojwt.SigningMethodRS256, testKID, wrongAud)); err == nil {
+		t.Fatal("expected wrong-audience token to be rejected")
+	}
+	if _, err := v.Validate(sign(t, key, gojwt.SigningMethodHS256, testKID, baseClaims())); err == nil {
+		t.Fatal("expected HS256 token to be rejected")
+	}
+}
+
+func TestConfig_SkipExpiryCheckRefusedInProduction(t *testing.T) {
+	t.Setenv("DX_ENV", "production")
+	cfg := Config{Enabled: true, JwksURL: "x", Issuer: "x", Audience: "x", SkipExpiryCheck: true}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected skip_expiry_check to be refused in production")
 	}
 }
 

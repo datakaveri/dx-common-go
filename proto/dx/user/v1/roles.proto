@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+// Package dx.user.v1 is dx-user-go's internal contract.
+//
+// It exists so a service can change a user's realm roles WITHOUT holding
+// Keycloak admin credentials. dx-user-go is the only service that talks to the
+// Keycloak admin API; everyone else asks it over this contract.
+//
+// The first caller is dx-marketplace-go, which grants `mor_admin` and `seller`
+// as merchants of record and their members are approved.
+package dx.user.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/userpb;userpb";
+
+// RoleService grants and revokes realm roles for other platform services.
+//
+// Internal only. Administrators change roles through dx-user-go's REST Generic
+// Roles API; this exists for service-driven changes.
+//
+// # Who may change which role
+//
+// The caller is the verified WORKLOAD (metadata, checked by the platform
+// interceptor), never a body field. dx-user-go keeps a per-workload allowlist
+// of roles: dx-marketplace-go may change `mor_admin` and `seller` and nothing
+// else. A role outside the caller's list is PERMISSION_DENIED, so a
+// compromised marketplace cannot mint `cos_admin`.
+service RoleService {
+  // GrantRoles assigns every role in the request to the user.
+  //
+  // IDEMPOTENT BY CONTRACT: granting a role the user already holds succeeds.
+  // Callers grant before committing their own state and may retry after a
+  // timeout, so a repeat must not fail.
+  rpc GrantRoles(GrantRolesRequest) returns (GrantRolesResponse);
+
+  // RevokeRoles removes every role in the request from the user.
+  //
+  // IDEMPOTENT BY CONTRACT: revoking a role the user does not hold succeeds.
+  rpc RevokeRoles(RevokeRolesRequest) returns (RevokeRolesResponse);
+}
+
+message GrantRolesRequest {
+  // The user whose roles change (Keycloak user id, UUID).
+  //
+  // A TARGET, not a claim — the same reasoning as dx.credits.v1
+  // EnsureAccountRequest.user_id. The caller's authority travels as verified
+  // workload identity; this field says who the change is FOR.
+  string user_id = 1;
+
+  // Realm role names, e.g. "mor_admin", "seller". At least one.
+  repeated string roles = 2;
+}
+
+message GrantRolesResponse {
+  // The user's realm roles after the change.
+  repeated string roles = 1;
+}
+
+message RevokeRolesRequest {
+  // The user whose roles change (Keycloak user id, UUID). See GrantRolesRequest.
+  string user_id = 1;
+
+  // Realm role names. At least one.
+  repeated string roles = 2;
+}
+
+message RevokeRolesResponse {
+  // The user's realm roles after the change.
+  repeated string roles = 1;
+}

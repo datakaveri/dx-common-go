@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/datakaveri/dx-common-go/transport/clientip"
+
 	"github.com/datakaveri/dx-common-go/auth"
 	dxmw "github.com/datakaveri/dx-common-go/middleware"
 )
@@ -28,10 +30,22 @@ func FromCtx(ctx context.Context) *Record {
 // SetAction marks the request auditable with the given business action.
 // No-op when auditing isn't wired (nil record). Mirrors the Java pattern of
 // handlers attaching an audit log to the routing context.
+//
+// It also fills the caller's identity when the record has none. Services mount
+// Middleware on the route prefix, which runs BEFORE the authentication
+// resolver, so BaseRecord saw no user and every record went out without
+// user_id — a NOT NULL column in the audit table, so all were dropped (F22).
+// The handler's ctx is past authentication, so the user is there now. An
+// identity the middleware did see is never overwritten.
 func SetAction(ctx context.Context, action string) *Record {
 	r := FromCtx(ctx)
 	if r != nil {
 		r.Action = action
+		if r.UserID == "" {
+			if user, ok := auth.UserFromCtx(ctx); ok {
+				r.fillIdentity(user)
+			}
+		}
 	}
 	return r
 }
@@ -69,7 +83,7 @@ func Middleware(pub *Publisher, originServer string) func(http.Handler) http.Han
 				return
 			}
 			// Fire-and-forget off the request path.
-			go pub.Publish(rec)
+			go pub.Publish(rec) //nolint:contextcheck // fire-and-forget audit publish, deliberately detached from the request lifetime
 		})
 	}
 }
@@ -85,16 +99,12 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// clientIP prefers chi's RealIP-rewritten RemoteAddr; strips the port.
+// clientIP derives the caller's address in a way the caller cannot choose.
+//
+// It used to return RemoteAddr, which chi's RealIP has already rewritten from
+// the client-supplied X-Forwarded-For — so this audit field recorded whatever
+// address the caller asked it to, in an audit trail whose purpose is
+// attribution (ROADMAP P1-4).
 func clientIP(req *http.Request) string {
-	host := req.RemoteAddr
-	for i := len(host) - 1; i >= 0; i-- {
-		if host[i] == ':' {
-			return host[:i]
-		}
-		if host[i] == ']' { // IPv6 without port
-			break
-		}
-	}
-	return host
+	return clientip.From(req, 0)
 }

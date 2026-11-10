@@ -7,12 +7,12 @@ import (
 	"sync"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.28.0"
-
-	"go.opentelemetry.io/otel/sdk/resource"
 )
 
 var initOnce sync.Once
@@ -43,16 +43,14 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 			return
 		}
 
-		exporter, exportErr := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpoint(endpoint), otlptracegrpc.WithInsecure())
+		exporter, exportErr := otlptracegrpc.New(ctx, exporterOptions(endpoint, cfg)...)
 		if exportErr != nil {
 			initErr = fmt.Errorf("observability.Init: create OTLP exporter: %w", exportErr)
 			shutdown = noop
 			return
 		}
 
-		res, resErr := resource.New(ctx,
-			resource.WithAttributes(semconv.ServiceName(cfg.ServiceName)),
-		)
+		res, resErr := newResource(ctx, cfg)
 		if resErr != nil {
 			initErr = fmt.Errorf("observability.Init: build resource: %w", resErr)
 			shutdown = noop
@@ -62,11 +60,14 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		tp := sdktrace.NewTracerProvider(
 			sdktrace.WithBatcher(exporter),
 			sdktrace.WithResource(res),
+			sdktrace.WithSampler(newSampler(cfg)),
 		)
 		otel.SetTracerProvider(tp)
-		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-			propagation.TraceContext{}, propagation.Baggage{},
-		))
+		// TraceContext only, Baggage deliberately omitted: OTel Baggage has no
+		// integrity guarantee and propagates to downstream (incl. third-party)
+		// calls, so it is off until an allowlisted, boundary-filtered use case
+		// is approved (OBSERVABILITY.md §5.2 / review P1-17).
+		otel.SetTextMapPropagator(propagation.TraceContext{})
 		shutdown = tp.Shutdown
 	})
 
@@ -80,4 +81,49 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		shutdown = noop
 	}
 	return shutdown, initErr
+}
+
+// exporterOptions builds the OTLP/gRPC exporter options. Insecure by default
+// (the node-local collector), TLS when cfg.Secure, plus any per-request headers
+// a managed collector needs.
+func exporterOptions(endpoint string, cfg Config) []otlptracegrpc.Option {
+	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(endpoint)}
+	if !cfg.Secure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+	if len(cfg.Headers) > 0 {
+		opts = append(opts, otlptracegrpc.WithHeaders(cfg.Headers))
+	}
+	return opts
+}
+
+// newResource builds the OTel resource from the service identity. Only
+// non-empty values are attached, so a build that omits a version or environment
+// does not report an empty string for it. Host and Kubernetes attributes are
+// added downstream by the Collector, not here (review P1-7), which also avoids
+// the resource-detector schema-URL merge conflicts.
+func newResource(ctx context.Context, cfg Config) (*resource.Resource, error) {
+	attrs := []attribute.KeyValue{semconv.ServiceName(cfg.ServiceName)}
+	if cfg.Version != "" {
+		attrs = append(attrs, semconv.ServiceVersion(cfg.Version))
+	}
+	if cfg.Environment != "" {
+		attrs = append(attrs, semconv.DeploymentEnvironmentName(cfg.Environment))
+	}
+	// WithFromEnv picks up OTEL_RESOURCE_ATTRIBUTES when an operator sets it,
+	// without assuming it carries Kubernetes identity.
+	return resource.New(ctx,
+		resource.WithAttributes(attrs...),
+		resource.WithFromEnv(),
+	)
+}
+
+// newSampler maps SampleRatio onto a sampler. See Config.SampleRatio for the
+// semantics: an unset/zero ratio samples everything (the pilot default), and a
+// remote parent's decision is always honoured.
+func newSampler(cfg Config) sdktrace.Sampler {
+	if cfg.SampleRatio <= 0 || cfg.SampleRatio >= 1 {
+		return sdktrace.AlwaysSample()
+	}
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SampleRatio))
 }

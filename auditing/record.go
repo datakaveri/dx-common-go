@@ -33,6 +33,25 @@ const (
 	LogTypeCredit     LogType = "CREDIT"
 )
 
+// Origin servers: the values of the Postgres enum origin_server that
+// user_activity_audit_log.origin_server is typed with (Java schema and
+// dx-audit-go migration alike). Any other value makes the consumer's INSERT
+// fail with SQLSTATE 22P02, so pass one of these to Middleware / BaseRecord.
+const (
+	OriginCatalogue = "CATALOGUE"
+	OriginAAA       = "AAA"
+	OriginFile      = "FILE"
+	OriginACLAPD    = "ACL_APD"
+	OriginNGSILD    = "NGSI_LD"
+	OriginGateway   = "GATEWAY"
+	OriginOGCRS     = "OGC_RS"
+	OriginSandbox   = "SANDBOX"
+	// Added by dx-audit-go migration 0002 / controlplane V85. Both services
+	// published these as literals the enum rejected, so every record was lost.
+	OriginCommunity   = "COMMUNITY"
+	OriginMarketplace = "MARKETPLACE"
+)
+
 // createdAtLayout matches Java LocalDateTime.toString() (no zone); the value
 // is stored verbatim into a Postgres timestamp column.
 const createdAtLayout = "2006-01-02T15:04:05.000000"
@@ -120,8 +139,6 @@ func EffectiveRole(roles []string) string {
 func BaseRecord(user auth.DxUser, originServer, api, method, ip, userAgent, requestID string) *Record {
 	r := &Record{
 		ID:           uuid.NewString(),
-		UserName:     user.Name,
-		Role:         EffectiveRole(user.Roles),
 		API:          api,
 		Method:       method,
 		OriginServer: originServer,
@@ -130,6 +147,18 @@ func BaseRecord(user auth.DxUser, originServer, api, method, ip, userAgent, requ
 		UserAgent:    userAgent,
 		CreatedAt:    time.Now().UTC().Format(createdAtLayout),
 	}
+	r.fillIdentity(user)
+	if _, err := uuid.Parse(requestID); err == nil {
+		r.RequestID = requestID
+	}
+	return r
+}
+
+// fillIdentity copies the caller's identity into the record, the way Java's
+// AuditLogHelper.createBaseAudit does.
+func (r *Record) fillIdentity(user auth.DxUser) {
+	r.UserName = user.Name
+	r.Role = EffectiveRole(user.Roles)
 	// Java parses these with parseUUID — only forward well-formed UUIDs.
 	if _, err := uuid.Parse(user.ID); err == nil {
 		r.UserID = user.ID
@@ -141,8 +170,4 @@ func BaseRecord(user auth.DxUser, originServer, api, method, ip, userAgent, requ
 	if _, err := uuid.Parse(user.DelegatorID); err == nil {
 		r.DelegatorID = user.DelegatorID
 	}
-	if _, err := uuid.Parse(requestID); err == nil {
-		r.RequestID = requestID
-	}
-	return r
 }

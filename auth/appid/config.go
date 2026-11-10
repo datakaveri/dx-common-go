@@ -27,6 +27,11 @@ type Config struct {
 	// VerifyCacheTTL controls how long successful VerifyAppId results are
 	// cached, avoiding a gRPC round-trip per request. Default 60s.
 	VerifyCacheTTL time.Duration `mapstructure:"verify_cache_ttl"`
+	// WorkloadDestination selects workload mode: the server is a Go service
+	// (dx-user-go) that verifies the platform workload credential, minted for
+	// this destination, instead of the Java controlplane's grpc:controlplane
+	// bearer. The token fields are then unused. Pair with Client.WithWorkload.
+	WorkloadDestination string `mapstructure:"workload_destination"`
 }
 
 // Validate checks required fields when the client is enabled.
@@ -36,6 +41,9 @@ func (c Config) Validate() error {
 	}
 	if c.Address == "" {
 		return errors.New("appid config: address is required")
+	}
+	if c.WorkloadDestination != "" {
+		return nil
 	}
 	if c.TokenURL == "" || c.ClientID == "" || c.ClientSecret == "" {
 		return errors.New("appid config: token_url, client_id and client_secret are required")

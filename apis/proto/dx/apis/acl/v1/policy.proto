@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+// Package dx.apis.acl.v1 is the shared policy contract.
+//
+// ONE CONTRACT, TWO SERVERS. This file is kept byte-for-byte identical in
+// dx-common-go/apis/proto and in the Java dx-common (src/main/proto). The Java
+// controlplane (acl/policy) and dx-acl-go both serve it, so a caller moves
+// between them by changing an address in config, never its code. The
+// controlplane's policy rules are the source of truth for both servers.
+//
+// Additive: dx.acl.v1.AclService is a separate contract and is not changed.
+//
+// Auth (both servers): metadata "authorization: Bearer <Keycloak
+// service-account token>"; the token's azp must be on the server's allowlist.
+// Errors are gRPC status codes, never fields in a response.
+package dx.apis.acl.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package           = "github.com/datakaveri/dx-common-go/apis/acl/v1;aclv1";
+option java_multiple_files  = true;
+option java_package         = "org.cdpg.dx.apis.acl.v1";
+option java_outer_classname = "PolicyProto";
+
+// PolicyService lets trusted services read and create access policies.
+service PolicyService {
+  // ListActivePolicies returns the ACTIVE, unexpired policies a subject holds
+  // on an item: policies naming the user as consumer, or GROUP policies whose
+  // access rules name the organisation. An empty list when there are none.
+  //
+  // Errors: INVALID_ARGUMENT (item_id or the subject empty / not a UUID).
+  rpc ListActivePolicies(ListActivePoliciesRequest) returns (ListActivePoliciesResponse);
+
+  // CreatePolicy creates one policy on behalf of grantor_id, with the same
+  // checks the controlplane's POST /policies applies.
+  //
+  // Not idempotent by itself: retrying a call whose outcome is unknown returns
+  // ALREADY_EXISTS when the first call succeeded; the caller then finds that
+  // policy with ListActivePolicies.
+  //
+  // Errors: INVALID_ARGUMENT (bad item type or access type, expires_at
+  //         missing or not in the future, malformed constraints),
+  //         NOT_FOUND (no such item or grantor), PERMISSION_DENIED (grantor
+  //         is neither the item's provider nor an org_admin of its
+  //         organisation), ALREADY_EXISTS (an overlapping ACTIVE policy).
+  rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
+}
+
+message ListActivePoliciesRequest {
+  string item_id = 1;
+  oneof subject {
+    string user_id         = 2; // the consumer
+    string organisation_id = 3; // a GROUP subject
+  }
+}
+
+message Policy {
+  string                    policy_id   = 1;
+  string                    item_id     = 2;
+  string                    policy_type = 3; // INDIVIDUAL | GROUP
+  string                    owner_id    = 4; // the grantor
+  string                    user_id     = 5; // the consumer; empty for GROUP
+  string                    constraints = 6; // JSON object, as stored
+  google.protobuf.Timestamp expires_at  = 7;
+  google.protobuf.Timestamp created_at  = 8;
+}
+
+message ListActivePoliciesResponse {
+  repeated Policy policies = 1; // newest first
+}
+
+message CreatePolicyRequest {
+  string                    item_id     = 1;
+  string                    item_type   = 2; // DATABANK | AIMODEL | APPS
+  string                    policy_type = 3; // INDIVIDUAL | GROUP
+  string                    grantor_id  = 4; // becomes owner_id
+  string                    user_id     = 5; // INDIVIDUAL: the consumer
+  string                    constraints = 6; // JSON: access[] (+ subjects for GROUP)
+  google.protobuf.Timestamp expires_at  = 7; // required, in the future
+}
+
+message CreatePolicyResponse {
+  Policy policy = 1;
+}

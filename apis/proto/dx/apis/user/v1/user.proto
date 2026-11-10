@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// Package dx.apis.user.v1 is the shared user contract.
+//
+// ONE CONTRACT, TWO SERVERS. This file is kept byte-for-byte identical in
+// dx-common-go/apis/proto and in the Java dx-common (src/main/proto). The Java
+// controlplane and dx-user-go both serve it, so a caller moves between them by
+// changing an address in config, never its code.
+//
+// Additive: dx.user.v1.RoleService is a separate contract and is not changed.
+//
+// Auth (both servers): metadata "authorization: Bearer <Keycloak
+// service-account token>"; the token's azp must be on the server's allowlist.
+// Errors are gRPC status codes, never fields in a response.
+package dx.apis.user.v1;
+
+option go_package           = "github.com/datakaveri/dx-common-go/apis/user/v1;userv1";
+option java_multiple_files  = true;
+option java_package         = "org.cdpg.dx.apis.user.v1";
+option java_outer_classname = "UserProto";
+
+// UserService reads users and changes their realm roles for trusted services.
+//
+// # Roles, the same on both servers
+//
+// A user's roles are the realm roles ASSIGNED DIRECTLY to them in Keycloak
+// (not composites), without Keycloak's own defaults (any role named
+// default-roles-*, offline_access, uma_authorization), sorted ascending.
+//
+// # Who may change which role
+//
+// Each server keeps a per-caller allowlist of roles, keyed by the token's azp.
+// A role outside the caller's list is PERMISSION_DENIED, so a compromised
+// caller cannot mint cos_admin.
+service UserService {
+  // GetUser returns one user.
+  // Errors: INVALID_ARGUMENT (user_id empty or not a UUID), NOT_FOUND.
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // GrantRoles assigns every role. IDEMPOTENT: a role the user already holds
+  // is not an error, so a caller may retry after a timeout.
+  // Errors: INVALID_ARGUMENT (no roles, or a role the realm does not have),
+  //         NOT_FOUND (no such user), PERMISSION_DENIED (role not allowed).
+  rpc GrantRoles(GrantRolesRequest) returns (GrantRolesResponse);
+
+  // RevokeRoles removes every role. IDEMPOTENT: a role the user does not hold
+  // is not an error. Errors as GrantRoles.
+  rpc RevokeRoles(RevokeRolesRequest) returns (RevokeRolesResponse);
+}
+
+message GetUserRequest {
+  string user_id = 1; // Keycloak user id (sub), UUID
+}
+
+message User {
+  string          id                = 1;
+  string          username          = 2;
+  string          email             = 3;
+  string          first_name        = 4;
+  string          last_name         = 5;
+  repeated string roles             = 6; // see "Roles" above
+  string          organisation_id   = 7; // empty: in no organisation
+  string          organisation_name = 8;
+  bool            enabled           = 9;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message GrantRolesRequest {
+  string          user_id = 1; // the user the change is FOR, not the caller
+  repeated string roles   = 2; // at least one
+}
+
+message GrantRolesResponse {
+  repeated string roles = 1; // the user's roles after the change
+}
+
+message RevokeRolesRequest {
+  string          user_id = 1;
+  repeated string roles   = 2; // at least one
+}
+
+message RevokeRolesResponse {
+  repeated string roles = 1; // the user's roles after the change
+}

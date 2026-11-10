@@ -3,6 +3,8 @@ package pagination
 import (
 	"math"
 	"strconv"
+
+	"github.com/datakaveri/dx-common-go/platform/paging"
 )
 
 // Request represents pagination parameters from a request
@@ -20,12 +22,12 @@ type Request struct {
 // Deprecated: use pagination.Info (the control-plane contract shape with
 // camelCase page/size/totalCount/totalPages/hasNext/hasPrevious).
 type Response struct {
-	Page       int `json:"page"`
-	PageSize   int `json:"page_size"`
+	Page       int   `json:"page"`
+	PageSize   int   `json:"page_size"`
 	Total      int64 `json:"total"`
-	TotalPages int `json:"total_pages"`
-	HasNext    bool `json:"has_next"`
-	HasPrev    bool `json:"has_prev"`
+	TotalPages int   `json:"total_pages"`
+	HasNext    bool  `json:"has_next"`
+	HasPrev    bool  `json:"has_prev"`
 }
 
 // Validate validates pagination parameters
@@ -78,7 +80,7 @@ func ParsePaginationParams(pageStr string, pageSizeStr string) Request {
 	}
 
 	req := Request{Page: page, PageSize: pageSize}
-	req.Validate()
+	_ = req.Validate() // clamps in place; the error return is vestigial and always nil
 	return req
 }
 
@@ -86,34 +88,22 @@ func ParsePaginationParams(pageStr string, pageSizeStr string) Request {
 // plane API contract (and the Go services that replace its endpoints). Unlike
 // Response (snake_case, used internally), Info uses the exact camelCase field
 // names the API contract requires.
-type Info struct {
-	Page        int   `json:"page"`
-	Size        int   `json:"size"`
-	TotalCount  int64 `json:"totalCount"`
-	TotalPages  int   `json:"totalPages"`
-	HasNext     bool  `json:"hasNext"`
-	HasPrevious bool  `json:"hasPrevious"`
-}
+//
+// Deprecated: use platform/paging.Info.
+//
+// This is a type ALIAS, not a copy — pagination.Info and paging.Info are the
+// same type, so call sites can migrate one at a time with no conversion
+// anywhere and no possibility of the two shapes drifting apart. See
+// claude-docs/PLATFORM-ARCHITECTURE.md §9 (Wave 0).
+type Info = paging.Info
 
 // NewInfo builds a paginationInfo object from a 1-based page, the page size, and
 // the total matching count. totalPages = ceil(totalCount/size) (0 when empty),
 // matching the control-plane contract.
+//
+// Deprecated: use platform/paging.NewInfo.
 func NewInfo(page, size int, totalCount int64) Info {
-	if page < 1 {
-		page = 1
-	}
-	if size < 1 {
-		size = 10
-	}
-	totalPages := int(math.Ceil(float64(totalCount) / float64(size)))
-	return Info{
-		Page:        page,
-		Size:        size,
-		TotalCount:  totalCount,
-		TotalPages:  totalPages,
-		HasNext:     page < totalPages,
-		HasPrevious: page > 1,
-	}
+	return paging.NewInfo(page, size, totalCount)
 }
 
 // PaginatedResult wraps data with pagination metadata

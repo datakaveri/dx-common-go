@@ -93,7 +93,7 @@ func TestAutoMap(t *testing.T) {
 		Attachments []Attachment `json:"attachments"`
 		Secret      string       `json:"-"`
 		Skipped     string       `json:"skipped" es:"-"`
-		internal    string       //nolint:unused — proves unexported fields are skipped
+		internal    string       //nolint:unused // proves unexported fields are skipped
 	}
 
 	body := AutoMap[Item]().Build()

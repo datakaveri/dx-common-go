@@ -1,7 +1,17 @@
-// Package email publishes notification requests to the dx-controlplane email
-// verticle. The controlplane consumes the configured RabbitMQ queue (its
-// `emailQueue` config, default "email-notification"), renders the template and
-// sends the mail over SMTP — Go services never talk to SMTP directly.
+// Package email publishes email notifications to the "email-notification"
+// RabbitMQ queue. Exactly one consumer reads that queue in a deployment: the
+// dx-controlplane email verticle or dx-notification-go. It resolves the
+// recipients, renders the template and sends the mail over SMTP — Go services
+// never talk to SMTP directly.
+//
+// Two message shapes exist:
+//
+//   - Event (event.go) is the platform contract, schemaVersion 2: the service
+//     says what happened (emailType), to whom (recipientIds/recipientRoles) and
+//     with what values (variables). Subjects, wording and addresses live in
+//     dx-notification-go. Publish it with Sender. New code uses this.
+//   - Request (this file) is the controlplane's legacy shape, kept so existing
+//     publishers keep working. dx-notification-go still accepts it.
 package email
 
 import (
@@ -43,6 +53,11 @@ type Request struct {
 	Status            string `json:"status,omitempty"`
 	AssetName         string `json:"assetName,omitempty"`
 	ExpiryAt          string `json:"expiryAt,omitempty"`
+	// Subject is the mail's subject line. Go-only and optional: Java's
+	// controlplane sends SMTP itself with its own subject, and its queue
+	// consumer (EmailRequest.fromJson) ignores the field. dx-notification-go
+	// uses it when set (F39 delegations, Ankit 2026-11-03).
+	Subject string `json:"subject,omitempty"`
 }
 
 func (r Request) validate() error {
@@ -63,8 +78,21 @@ type Config struct {
 	// Enabled gates all sends; when false Send is a logged no-op so callers
 	// never need their own flag checks.
 	Enabled bool `mapstructure:"enabled"`
-	// Queue is the RabbitMQ queue the controlplane email consumer reads.
+	// Queue is the RabbitMQ queue the controlplane email consumer reads. Used
+	// only when Exchange is empty: the message then goes to the default
+	// exchange with the queue name as routing key (the controlplane's way).
 	Queue string `mapstructure:"queue"`
+	// Exchange, when set, is where Sender publishes Events instead, with
+	// RoutingKey (or each event's emailType) as routing key. The publisher
+	// knows no queue — dx-notification-go reads its own queue, bound to this
+	// exchange. Sender only publishes; whoever owns the topology creates the
+	// exchange (a topic exchange, so consumers can bind with wildcards).
+	Exchange string `mapstructure:"exchange"`
+	// RoutingKey is the key events are published to Exchange with, like
+	// auditing.routing_key; the consumer's binding_key must match it. Empty:
+	// each event's emailType, so a consumer can bind per type or domain
+	// ("marketplace.#").
+	RoutingKey string `mapstructure:"routing_key"`
 	// TemplateType / TemplateStructure are applied to requests that don't set
 	// their own, so call sites stay template-agnostic.
 	TemplateType      string `mapstructure:"template_type"`

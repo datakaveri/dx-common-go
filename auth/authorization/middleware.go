@@ -3,6 +3,7 @@ package authorization
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/datakaveri/dx-common-go/auth"
@@ -64,6 +65,55 @@ func ForScope(scope DelegationScope, entityIDParam string) func(http.Handler) ht
 
 			dxerrors.WriteError(w, dxerrors.NewForbidden("delegation scope "+string(scope)+" not granted for this entity"))
 		})
+	}
+}
+
+// ForRolesGin is the gin equivalent of ForRoles.
+func ForRolesGin(roles ...DxRole) gin.HandlerFunc {
+	required := NewRoleSet(roles...)
+	return func(c *gin.Context) {
+		user, ok := auth.UserFromCtx(c.Request.Context())
+		if !ok {
+			dxerrors.WriteGinError(c, dxerrors.NewUnauthorized("no authenticated user in context"))
+			return
+		}
+
+		userRoles := make([]DxRole, 0, len(user.Roles))
+		for _, s := range user.Roles {
+			userRoles = append(userRoles, DxRole(s))
+		}
+
+		if !required.HasAny(userRoles) {
+			dxerrors.WriteGinError(c, dxerrors.NewForbidden("insufficient role: one of "+rolesToString(roles)+" required"))
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// ForScopeGin is the gin equivalent of ForScope. entityIDParam is a gin route
+// parameter name (registered as :entityIDParam in the route path).
+func ForScopeGin(scope DelegationScope, entityIDParam string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, ok := auth.UserFromCtx(c.Request.Context())
+		if !ok {
+			dxerrors.WriteGinError(c, dxerrors.NewUnauthorized("no authenticated user in context"))
+			return
+		}
+
+		entityID := c.Param(entityIDParam)
+
+		for _, entry := range user.Scopes {
+			if entry.EntityID == entityID || entry.EntityID == "*" {
+				if DelegationScope(entry.Scope) == scope || DelegationScope(entry.Scope) == ScopeWildcard {
+					c.Next()
+					return
+				}
+			}
+		}
+
+		dxerrors.WriteGinError(c, dxerrors.NewForbidden("delegation scope "+string(scope)+" not granted for this entity"))
 	}
 }
 

@@ -55,3 +55,40 @@ func (c *Client) ListObjects(ctx context.Context, prefix string, opts ...ListOpt
 	}
 	return objects, nil
 }
+
+// ListLevel lists one hierarchy level under prefix, paginating internally:
+// the objects directly beneath it and the common prefixes delimiter groups the
+// rest into. An empty delimiter defaults to "/".
+func (c *Client) ListLevel(ctx context.Context, prefix, delimiter string) ([]ObjectInfo, []string, error) {
+	if delimiter == "" {
+		delimiter = "/"
+	}
+	in := &awss3.ListObjectsV2Input{Bucket: aws.String(c.bucket), Delimiter: aws.String(delimiter)}
+	if prefix != "" {
+		in.Prefix = aws.String(prefix)
+	}
+
+	var (
+		objects  []ObjectInfo
+		prefixes []string
+	)
+	paginator := awss3.NewListObjectsV2Paginator(c.api, in)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("s3.ListLevel %q: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			objects = append(objects, ObjectInfo{
+				Key:          aws.ToString(obj.Key),
+				ETag:         aws.ToString(obj.ETag),
+				Size:         aws.ToInt64(obj.Size),
+				LastModified: aws.ToTime(obj.LastModified),
+			})
+		}
+		for _, cp := range page.CommonPrefixes {
+			prefixes = append(prefixes, aws.ToString(cp.Prefix))
+		}
+	}
+	return objects, prefixes, nil
+}

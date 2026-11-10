@@ -1,6 +1,12 @@
 package s3
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
 
 func TestNormalizeEndpoint(t *testing.T) {
 	tests := []struct {
@@ -29,5 +35,17 @@ func TestWithDelimiter(t *testing.T) {
 	WithDelimiter("/")(&o)
 	if o.delimiter != "/" {
 		t.Fatalf("WithDelimiter did not set delimiter: got %q", o.delimiter)
+	}
+}
+
+func TestIsNotFound(t *testing.T) {
+	if !IsNotFound(fmt.Errorf("wrapped: %w", &types.NotFound{})) {
+		t.Error("a wrapped NotFound must be recognised")
+	}
+	if !IsNotFound(&types.NoSuchKey{}) {
+		t.Error("NoSuchKey must be recognised")
+	}
+	if IsNotFound(errors.New("connection refused")) || IsNotFound(nil) {
+		t.Error("a transport failure is not a not-found")
 	}
 }

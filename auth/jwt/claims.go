@@ -18,9 +18,30 @@ type DxClaims struct {
 	OrganisationID    string           `json:"organisation_id"`
 	OrganisationName  string           `json:"organisation_name"`
 	DelegatorID       string           `json:"did,omitempty"`
+	// AuthorizedParty is the OIDC "azp" claim — the client the token was
+	// issued to. On a client-credentials token that client IS the calling
+	// workload, which is what platform/security/workload authenticates.
+	// Distinct from Subject: `sub` is the service-account user Keycloak
+	// created for the client, `azp` is the client itself.
+	AuthorizedParty string `json:"azp,omitempty"`
+	// ClientID is Keycloak's "client_id" claim. Some token profiles emit it
+	// instead of azp, so workload verification falls back to it rather than
+	// rejecting a legitimate credential over a claim-name difference.
+	ClientID string `json:"client_id,omitempty"`
 	// Scope is the raw space-separated scope string from the token.
-	Scope             string                 `json:"scope,omitempty"`
-	DelegationScopes  []DelegationScopeClaim `json:"delegation_scopes,omitempty"`
+	Scope            string                 `json:"scope,omitempty"`
+	DelegationScopes []DelegationScopeClaim `json:"delegation_scopes,omitempty"`
+	// Act identifies the acting party on a delegated token (RFC 8693 §4.1).
+	// Present only on tokens minted via token exchange: sub stays the user,
+	// Act.Sub names the agent acting on their behalf.
+	Act *ActClaim `json:"act,omitempty"`
+	// DelegationID joins a delegated token to the grant that authorized it.
+	DelegationID string `json:"delegation_id,omitempty"`
+}
+
+// ActClaim is the RFC 8693 "act" (actor) claim on a delegated token.
+type ActClaim struct {
+	Sub string `json:"sub"`
 }
 
 // RealmAccess holds the list of realm-level roles.
@@ -33,7 +54,15 @@ type Roles struct {
 	Roles []string `json:"roles"`
 }
 
-// DelegationScopeClaim represents a single scope entry in a delegation token.
+// DelegationScopeClaim represents a single scope entry in a delegation token
+// (the AppID provider→consumer delegation feature — unrelated to the agent
+// plane's grant model).
+//
+// Expiry is carried through from the token as-is but is NOT enforced by
+// HasScopeForEntity or anywhere else in this codebase: callers that need an
+// expiry check must parse and compare it themselves. The authoritative
+// "is this still valid" answer for AppID delegations comes from the
+// controlplane gRPC (ResolveDelegation), not from this claim.
 type DelegationScopeClaim struct {
 	Scope    string `json:"scope"`
 	EntityID string `json:"entity_id"`

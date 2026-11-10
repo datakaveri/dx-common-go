@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+// Package dx.acl.v1 is dx-acl-go's internal contract.
+//
+// It exists for the platform's decision point (dx-authz-go): after OpenFGA
+// says no, the PDP asks the ACL whether a stored grant still allows the user —
+// the Go counterpart of the Java control plane's initiateVerifyPolicy plus its
+// access-rule fallback (PolicyServiceImpl / AccessRuleDaoImpl).
+package dx.acl.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/aclpb;aclpb";
+
+// AclService answers grant questions for other platform services.
+service AclService {
+  // VerifyAccess reports whether an ACTIVE, unexpired grant lets the user
+  // access the item: a policy naming the user (or a group policy listing
+  // them), else an access rule matching the user or their organisation and
+  // role. With a delegator the delegator is tried first, then the user, as in
+  // Java.
+  //
+  // The user is a FIELD here, unlike the catalogue's GetItem subject: it is the
+  // subject of the question being asked, not the identity of the caller. The
+  // caller is the PDP, authenticated by its workload credential, and the ACL
+  // serves this RPC only to the workloads it lists as verify callers.
+  rpc VerifyAccess(VerifyAccessRequest) returns (VerifyAccessResponse);
+}
+
+message VerifyAccessRequest {
+  // Item id (UUID).
+  string item_id = 1;
+  // The end user asking for the item (UUID, the token's sub).
+  string user_id = 2;
+  // The user's organisation id, matched against access rules.
+  string organisation_id = 3;
+  // The user's platform roles, matched against access rules.
+  repeated string roles = 4;
+  // The delegator (the token's did), empty when the user acts for themself.
+  string delegator_id = 5;
+}
+
+message VerifyAccessResponse {
+  // True when a grant allows access. False is a normal answer, not an error.
+  bool allowed = 1;
+  // The grant that matched: "policy" or "rule". Empty when not allowed.
+  string matched_by = 2;
+  // The matching policy's id (for a rule, the policy it was created from).
+  string policy_id = 3;
+  // The grant's constraints as JSON, verbatim from the store.
+  string constraints = 4;
+  // RFC 3339 expiry of the matching grant.
+  string expiry_at = 5;
+  // Whose grant matched: the user's id or the delegator's id.
+  string granted_to = 6;
+}

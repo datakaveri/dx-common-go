@@ -8,9 +8,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	dxerrors "github.com/datakaveri/dx-common-go/errors"
+	perrors "github.com/datakaveri/dx-common-go/platform/errors"
 )
 
-func codeOf(t *testing.T, err error) dxerrors.ErrorCode {
+func codeOf(t *testing.T, err error) perrors.Code {
 	t.Helper()
 	var dxe dxerrors.DxError
 	if !errors.As(err, &dxe) {
@@ -26,17 +27,17 @@ func TestMapPgError_NilPassthrough(t *testing.T) {
 }
 
 func TestMapPgError_NoRowsIsNotFound(t *testing.T) {
-	if got := codeOf(t, MapPgError(pgx.ErrNoRows)); got != dxerrors.ErrNotFound {
+	if got := codeOf(t, MapPgError(pgx.ErrNoRows)); got != perrors.CodeNotFound {
 		t.Fatalf("ErrNoRows → %s, want ERR_NOT_FOUND", got)
 	}
 }
 
 func TestMapPgError_ConstraintCodes(t *testing.T) {
-	cases := map[string]dxerrors.ErrorCode{
-		"23505": dxerrors.ErrConflict,   // unique
-		"23503": dxerrors.ErrValidation, // FK
-		"23502": dxerrors.ErrValidation, // not null
-		"23514": dxerrors.ErrValidation, // check
+	cases := map[string]perrors.Code{
+		"23505": perrors.CodeConflict,   // unique
+		"23503": perrors.CodeValidation, // FK
+		"23502": perrors.CodeValidation, // not null
+		"23514": perrors.CodeValidation, // check
 	}
 	for pgCode, want := range cases {
 		err := MapPgError(&pgconn.PgError{Code: pgCode, Detail: "x"})

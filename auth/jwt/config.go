@@ -3,6 +3,8 @@ package jwt
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -22,10 +24,24 @@ type Config struct {
 	Audience string `mapstructure:"audience"`
 	// LeewaySeconds is added to expiry/nbf/iat checks to account for clock skew.
 	LeewaySeconds int `mapstructure:"leeway_seconds"`
-	// RefreshInterval controls how often the JWKS cache is refreshed.
+	// RefreshInterval controls how often the JWKS cache is refreshed. Unset (or
+	// non-positive) selects a 5-minute default.
+	//
+	// This is now the effective cadence (ROADMAP P1-9, fixed 2026-08-11).
+	// NewKeycloakJWKS constructs the jwkset HTTP client with this interval
+	// explicitly, rather than the previous keyfunc.NewDefaultCtx, which ignored
+	// it and refreshed hourly regardless — so an operator tuning this knob was
+	// getting silence. A brand-new kid is still picked up immediately by the
+	// unknown-kid refetch; the interval governs how quickly a rotation of the
+	// material behind an EXISTING kid is followed.
 	RefreshInterval time.Duration `mapstructure:"refresh_interval"`
 	// Enabled controls whether JWT validation is active. Set false for local dev.
 	Enabled bool `mapstructure:"enabled"`
+	// SkipExpiryCheck accepts tokens whose exp has passed, so a long local or
+	// Postman session does not need a fresh Keycloak token every few minutes.
+	// Signature, algorithm, issuer, audience, nbf and iat are still enforced;
+	// only exp is ignored. Refused when DX_ENV is production.
+	SkipExpiryCheck bool `mapstructure:"skip_expiry_check"`
 }
 
 // Validate checks that the configuration is safe to use. Issuer and Audience
@@ -46,6 +62,10 @@ func (c Config) Validate() error {
 	}
 	if c.LeewaySeconds < 0 || c.LeewaySeconds > maxLeewaySeconds {
 		return fmt.Errorf("jwt config: leeway_seconds must be between 0 and %d", maxLeewaySeconds)
+	}
+	if env := os.Getenv("DX_ENV"); c.SkipExpiryCheck &&
+		(strings.EqualFold(env, "production") || strings.EqualFold(env, "prod")) {
+		return errors.New("jwt config: skip_expiry_check is not allowed when DX_ENV=" + env)
 	}
 	return nil
 }

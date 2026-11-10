@@ -1,0 +1,15 @@
+# Regenerate Go-owned gRPC contracts.
+#
+# Checked-in generated code, deliberately: the fleet builds with `go build` and
+# nothing else, and a codegen step in every service's build is a step that
+# breaks on a machine without protoc.
+#
+# Requires: protoc, protoc-gen-go, protoc-gen-go-grpc
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+.PHONY: proto
+proto:
+	protoc --proto_path=proto \
+	  --go_out=. --go_opt=module=github.com/datakaveri/dx-common-go \
+	  --go-grpc_out=. --go-grpc_opt=module=github.com/datakaveri/dx-common-go \
+	  $$(find proto -name '*.proto')

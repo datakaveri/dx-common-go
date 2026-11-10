@@ -80,6 +80,10 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				OrganisationName: claims.OrganisationName,
 				DelegatorID:      claims.DelegatorID,
 				Scopes:           scopeEntries,
+				DelegationID:     claims.DelegationID,
+			}
+			if claims.Act != nil {
+				user.AgentSubject = claims.Act.Sub
 			}
 
 			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))

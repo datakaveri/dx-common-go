@@ -9,6 +9,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -29,22 +30,37 @@ type PublisherConfig struct {
 	Logger   *zap.Logger
 }
 
-// ReliablePublisher publishes to RabbitMQ with lazy reconnect and one
-// automatic retry on a closed channel. Safe for concurrent use. It unifies
-// the previously per-service publishers (dx-acl-go events.Publisher,
-// dx-files-connect-api-go messaging.Client) and satisfies the
-// notify/email.Publisher interface via PublishJSON.
+// ReliablePublisher publishes to RabbitMQ with a background reconnect
+// supervisor and one automatic retry on a closed channel. Safe for concurrent
+// use. It unifies the previously per-service publishers (dx-acl-go
+// events.Publisher, dx-files-connect-api-go messaging.Client) and satisfies
+// the notify/email.Publisher interface via PublishJSON.
+//
+// A dropped connection or broker-closed channel is redialled in the
+// background (exponential backoff, 1s→30s — the same supervisor shape as
+// ConsumerRunner), so IsConnected recovers without waiting for the next
+// Publish. Before this a publish-only service that gates readiness on the
+// publisher stayed NotReady after any drop until a write it could no longer
+// receive (F38).
 type ReliablePublisher struct {
 	cfg    PublisherConfig
 	logger *zap.Logger
 
-	mu   sync.Mutex
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	mu     sync.Mutex
+	conn   *amqp.Connection
+	ch     *amqp.Channel
+	closed bool
+
+	// dialMu serialises (re)dials so the supervisor and a failing Publish
+	// never race each other into two connections.
+	dialMu    sync.Mutex
+	stop      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewReliablePublisher dials the broker. A failed initial dial is not fatal:
-// the first Publish call retries, so service startup never blocks on RMQ.
+// the supervisor keeps retrying in the background (and the first Publish
+// retries too), so service startup never blocks on RMQ.
 func NewReliablePublisher(cfg PublisherConfig) (*ReliablePublisher, error) {
 	if cfg.URL == "" {
 		return nil, errors.New("rabbitmq publisher: URL is required")
@@ -53,16 +69,94 @@ func NewReliablePublisher(cfg PublisherConfig) (*ReliablePublisher, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	p := &ReliablePublisher{cfg: cfg, logger: logger}
+	p := &ReliablePublisher{cfg: cfg, logger: logger, stop: make(chan struct{})}
 	if err := p.dial(); err != nil {
-		logger.Warn("publisher initial dial failed; will retry on first publish", zap.Error(err))
+		logger.Warn("publisher initial dial failed; reconnecting in the background", zap.Error(err))
+		go p.reconnect()
 	}
 	return p, nil
+}
+
+// ErrExchangeNotFound is CheckExchange's answer for a missing exchange.
+var ErrExchangeNotFound = errors.New("rabbitmq: exchange not found")
+
+// ErrNotConnected is CheckExchange's answer while the publisher has no
+// connection (e.g. the broker was unreachable at startup).
+var ErrNotConnected = errors.New("rabbitmq publisher: not connected")
+
+// checkTimeout bounds CheckExchange when ctx has no deadline.
+const checkTimeout = 10 * time.Second
+
+// CheckExchange reports whether exchange exists, without creating or changing
+// anything: a passive declare, which the broker answers "exists" or 404. A
+// service whose broker user may only publish uses it at startup to fail fast
+// on a missing or misspelt exchange — a publish to one is otherwise only
+// noticed when the first message is lost.
+//
+// It runs on a short-lived channel of its own, because a failed passive
+// declare closes the channel it ran on and the publishing channel must not be
+// touched. Returns ErrExchangeNotFound for a missing exchange, ErrNotConnected
+// without a connection, nil for the default exchange ("").
+func (p *ReliablePublisher) CheckExchange(ctx context.Context, exchange string) error {
+	if exchange == "" {
+		return nil
+	}
+	p.mu.Lock()
+	conn := p.conn
+	p.mu.Unlock()
+	if conn == nil || conn.IsClosed() {
+		return ErrNotConnected
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, checkTimeout)
+		defer cancel()
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("rabbitmq: open channel to check exchange %q: %w", exchange, err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		// The kind is ignored by a passive declare; only the name is checked.
+		done <- ch.ExchangeDeclarePassive(exchange, "topic", true, false, false, false, nil)
+	}()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		return fmt.Errorf("rabbitmq: check exchange %q: %w", exchange, ctx.Err())
+	}
+	if err == nil {
+		return nil
+	}
+	var ae *amqp.Error
+	if errors.As(err, &ae) && ae.Code == amqp.NotFound {
+		return fmt.Errorf("%w: %q", ErrExchangeNotFound, exchange)
+	}
+	return fmt.Errorf("rabbitmq: check exchange %q: %w", exchange, err)
 }
 
 // PublishOptions carries optional per-message metadata.
 type PublishOptions struct {
 	MessageID string
+	// Type is the AMQP message type property, e.g. a notification's emailType.
+	// It lets broker tooling show what a message is without decoding the body.
+	Type string
+	// Headers are merged onto the message's application headers, after trace
+	// context is injected. A key that collides with a trace header loses —
+	// corrupting trace propagation to carry an application value would be a
+	// silent observability outage.
+	Headers map[string]any
+	// NewRoot starts the producer span as a fresh trace root rather than a child
+	// of any span on ctx. A DLQ replay uses it so re-publishing a days-old
+	// message does not reopen a days-old trace (review P1-2).
+	NewRoot bool
+	// Links attaches span links to the producer span — a DLQ replay links the
+	// republish back to the original message's trace (from ExtractDeliveryContext).
+	Links []trace.Link
 }
 
 // Publish sends body to exchange/routingKey, redialing and retrying once if
@@ -71,16 +165,29 @@ type PublishOptions struct {
 // message so a consumer can continue the trace (a no-op until observability.Init
 // configures a TracerProvider and propagator).
 func (p *ReliablePublisher) Publish(ctx context.Context, exchange, routingKey string, body []byte, opts PublishOptions) error {
-	ctx, span := startProducerSpan(ctx, exchange, routingKey)
+	var spanOpts []trace.SpanStartOption
+	if opts.NewRoot {
+		spanOpts = append(spanOpts, trace.WithNewRoot())
+	}
+	if len(opts.Links) > 0 {
+		spanOpts = append(spanOpts, trace.WithLinks(opts.Links...))
+	}
+	ctx, span := startProducerSpan(ctx, exchange, routingKey, spanOpts...)
 	defer span.End()
 
 	headers := amqp.Table{}
 	injectTraceContext(ctx, headers)
+	for k, v := range opts.Headers {
+		if _, taken := headers[k]; !taken {
+			headers[k] = v
+		}
+	}
 	pub := amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Timestamp:    time.Now().UTC(),
 		MessageId:    opts.MessageID,
+		Type:         opts.Type,
 		Headers:      headers,
 		Body:         body,
 	}
@@ -96,7 +203,7 @@ func (p *ReliablePublisher) publishWithRetry(ctx context.Context, exchange, rout
 	if err := p.publishOnce(ctx, exchange, routingKey, pub); err != nil {
 		if errors.Is(err, amqp.ErrClosed) || isChannelClosedErr(err) {
 			p.logger.Warn("publish channel closed, redialling", zap.Error(err))
-			if derr := p.dial(); derr != nil {
+			if derr := p.redial(); derr != nil {
 				return fmt.Errorf("redial after publish failure: %w", derr)
 			}
 			if err2 := p.publishOnce(ctx, exchange, routingKey, pub); err2 != nil {
@@ -109,17 +216,30 @@ func (p *ReliablePublisher) publishWithRetry(ctx context.Context, exchange, rout
 	return nil
 }
 
-// PublishJSON marshals v and publishes it (background context). It implements
-// the notify/email.Publisher interface so the email notifier can share this
-// publisher's connection.
-func (p *ReliablePublisher) PublishJSON(exchange, routingKey string, v any) error {
+// PublishJSONCtx marshals v and publishes it under ctx, so the producer span
+// links to the initiating operation's trace and the publish honours that
+// operation's deadline and cancellation. Prefer it wherever a request or
+// consumer context is in hand (review P1-1).
+func (p *ReliablePublisher) PublishJSONCtx(ctx context.Context, exchange, routingKey string, v any) error {
 	body, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("rabbitmq publisher: marshal: %w", err)
 	}
+	return p.Publish(ctx, exchange, routingKey, body, PublishOptions{})
+}
+
+// PublishJSON marshals v and publishes it under a fresh background context with
+// a 5s timeout. It implements the notify/email.Publisher interface so the email
+// notifier can share this publisher's connection.
+//
+// A caller that holds a request or consumer context should use PublishJSONCtx
+// instead: this context-free form detaches the publish from the initiating
+// trace, so its producer span starts a new root rather than continuing the work
+// that triggered it (review P1-1).
+func (p *ReliablePublisher) PublishJSON(exchange, routingKey string, v any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return p.Publish(ctx, exchange, routingKey, body, PublishOptions{})
+	return p.PublishJSONCtx(ctx, exchange, routingKey, v)
 }
 
 func (p *ReliablePublisher) publishOnce(ctx context.Context, exchange, routingKey string, pub amqp.Publishing) error {
@@ -181,6 +301,11 @@ func (p *ReliablePublisher) dial() error {
 	}
 
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		conn.Close()
+		return errors.New("rabbitmq publisher: closed")
+	}
 	old := p.conn
 	p.conn, p.ch = conn, ch
 	p.mu.Unlock()
@@ -188,7 +313,82 @@ func (p *ReliablePublisher) dial() error {
 	if old != nil {
 		_ = old.Close()
 	}
+	go p.watch(conn, ch)
 	return nil
+}
+
+// redial dials unless another caller (the supervisor or a concurrent Publish)
+// already restored the channel while this one waited for dialMu.
+func (p *ReliablePublisher) redial() error {
+	p.dialMu.Lock()
+	defer p.dialMu.Unlock()
+	if p.IsConnected() {
+		return nil
+	}
+	return p.dial()
+}
+
+// watch waits for conn or ch to close and hands over to the supervisor —
+// unless they were replaced by a newer dial or the publisher was closed, in
+// which case the close was ours and there is nothing to recover.
+func (p *ReliablePublisher) watch(conn *amqp.Connection, ch *amqp.Channel) {
+	connClosed := conn.NotifyClose(make(chan *amqp.Error, 1))
+	chClosed := ch.NotifyClose(make(chan *amqp.Error, 1))
+
+	var reason *amqp.Error
+	select {
+	case <-p.stop:
+		return
+	case reason = <-connClosed:
+	case reason = <-chClosed:
+	}
+
+	p.mu.Lock()
+	current := !p.closed && p.ch == ch
+	p.mu.Unlock()
+	if !current {
+		return
+	}
+	// The close reason is the only evidence of WHY the broker link went away
+	// (idle timeout, broker restart, channel exception), so it is always logged.
+	// Declared as error, not inferred: reason is an *amqp.Error, and assigning
+	// a nil one to an interface would make err non-nil.
+	var err error
+	if reason != nil {
+		err = reason
+	} else {
+		err = errors.New("closed without an AMQP error")
+	}
+	p.logger.Warn("publisher connection lost, reconnecting",
+		zap.String("exchange", p.cfg.Exchange), zap.Error(err))
+	p.reconnect()
+}
+
+// reconnect redials with exponential backoff (1s→30s) until it succeeds or the
+// publisher is closed.
+func (p *ReliablePublisher) reconnect() {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-time.After(backoff):
+		}
+		err := p.redial()
+		if err == nil {
+			p.logger.Info("publisher reconnected", zap.String("exchange", p.cfg.Exchange))
+			return
+		}
+		p.logger.Warn("publisher reconnect failed",
+			zap.String("exchange", p.cfg.Exchange), zap.Error(err), zap.Duration("backoff", backoff))
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
 }
 
 // IsConnected reports whether the publisher currently holds an open channel.
@@ -199,10 +399,35 @@ func (p *ReliablePublisher) IsConnected() bool {
 	return p.ch != nil && !p.ch.IsClosed()
 }
 
-// Close releases the connection and channel.
+// Check implements the platform's health.Checker (Check(ctx) error), so a
+// publisher can be registered directly as a readiness probe:
+//
+//	app.Probe("rabbitmq", publisher)
+//
+// The interface is satisfied STRUCTURALLY — this package does not import
+// platform/observability/health, which would point a legacy messaging package
+// at the platform tree. ConsumerRunner and Client carry the same pair, so
+// "how do I probe this?" has one answer whichever broker handle a service holds.
+//
+// A dropped link reports not-connected only for the supervisor's reconnect
+// backoff (at most 30s between attempts), so gating readiness on a publisher
+// reflects whether the broker is reachable, not whether anything was published
+// recently. Whether that should gate traffic is still the service's call:
+// Health.Add to gate, Health.AddOptional for a service that degrades.
+func (p *ReliablePublisher) Check(context.Context) error {
+	if !p.IsConnected() {
+		return fmt.Errorf("rabbitmq: publisher not connected to exchange %q", p.cfg.Exchange)
+	}
+	return nil
+}
+
+// Close stops the reconnect supervisor and releases the connection and
+// channel. It is final: a closed publisher never dials again.
 func (p *ReliablePublisher) Close() {
+	p.closeOnce.Do(func() { close(p.stop) })
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closed = true
 	if p.ch != nil {
 		p.ch.Close()
 	}

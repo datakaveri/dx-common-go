@@ -122,3 +122,12 @@ func (c *Client) CopyObject(ctx context.Context, srcKey, dstKey string) error {
 	}
 	return nil
 }
+
+// IsNotFound reports whether err is the backend saying the object (or key) does
+// not exist — HeadObject's NotFound or GetObject's NoSuchKey — as opposed to
+// any failure to find out.
+func IsNotFound(err error) bool {
+	var nf *types.NotFound
+	var nsk *types.NoSuchKey
+	return errors.As(err, &nf) || errors.As(err, &nsk)
+}

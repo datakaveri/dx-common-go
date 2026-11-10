@@ -12,12 +12,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/datakaveri/dx-common-go/auth"
 	"github.com/datakaveri/dx-common-go/resilience"
-	"github.com/datakaveri/dx-common-go/transport/headers"
 )
 
-// Client is a typed REST client for dx-authz-go.
+// Client is a typed REST client for dx-authz-go's legacy /v1/check + /v1/policies
+// endpoints.
+//
+// SUPERSEDED (do not add new callers): for authorization decisions use
+// platform/authz/client.Client, which speaks the standards-based AuthZEN
+// /access/v1/evaluation contract and names ratified PERMISSIONS rather than
+// hand-written relation names. This client is retained for the deprecated
+// /v1/check path (selected per service by authz.mode=legacy and by the gateway's
+// legacy/shadow modes) and for policy CRUD, and will be removed once every
+// decision caller is on the AuthZEN client. The request/response TYPES in this
+// package (PolicyRequest, CheckRequest, …) remain the wire contract for the
+// policy.* events and are not deprecated.
 //
 // It is safe for concurrent use; underlying http.Client transport pooling is
 // inherited. Callers should construct one Client per service and reuse it.
@@ -30,9 +39,6 @@ type Client struct {
 func New(cfg Config) (*Client, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("fga.New: BaseURL is required")
-	}
-	if cfg.SharedSecret != "" && cfg.ServiceName == "" {
-		return nil, fmt.Errorf("fga.New: ServiceName is required when SharedSecret is set")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if cfg.Timeout == 0 {
@@ -160,17 +166,23 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if c.cfg.ServiceToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.ServiceToken)
 	}
-	if c.cfg.SharedSecret != "" {
-		// HMAC service identity — lets the authz service require resolver
-		// auth on /v1/* without per-service tokens.
-		signed, err := headers.Sign(auth.DxUser{
-			ID:    "svc:" + c.cfg.ServiceName,
-			Roles: []string{"service"},
-		}, headers.Config{Secret: []byte(c.cfg.SharedSecret)})
-		if err != nil {
-			return fmt.Errorf("fga client: sign service identity: %w", err)
+	if c.cfg.Workload != nil {
+		// The client's identity, and now the only one it has.
+		//
+		// It used to sign a FABRICATED user — X-Subject-* naming
+		// "svc:<ServiceName>" with role "service" — as its service identity.
+		// That was never a user, and it worked only because every holder of the
+		// shared secret could mint any subject (review finding C-02). It is
+		// deleted with the secret (ROADMAP P0-17 stage 2).
+		//
+		// A failure is now FATAL, which is the change that matters here. While
+		// the pseudo-user was still being sent, failing open kept a Keycloak
+		// blip from becoming a denial of service on the PDP path; with nothing
+		// left to fall back to, proceeding would send an unauthenticated call
+		// that the receiver must reject anyway.
+		if err := c.cfg.Workload.Authorize(ctx, req, AuthzWorkload); err != nil {
+			return fmt.Errorf("fga client: workload credential: %w", err)
 		}
-		headers.Apply(req, signed)
 	}
 
 	resp, err := c.http.Do(req)
@@ -187,16 +199,26 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 
 	if out != nil && len(respBody) > 0 {
-		// Successful responses use the DxResponse envelope; the payload lives
-		// under "results". Fall back to direct decoding for legacy bodies.
+		// Successful responses use the platform envelope (platform/http), whose
+		// payload lives under "result" — singular. This read "results" only, so
+		// every real authz answer fell through to the top-level decode, Allowed
+		// stayed false, and the gateway denied every request it checked (F34).
+		// "results" is still accepted for older bodies, then direct decoding.
 		var envelope struct {
+			Result  json.RawMessage `json:"result"`
 			Results json.RawMessage `json:"results"`
 		}
-		if err := json.Unmarshal(respBody, &envelope); err == nil && len(envelope.Results) > 0 {
-			if err := json.Unmarshal(envelope.Results, out); err != nil {
-				return fmt.Errorf("fga client: decode results: %w", err)
+		if err := json.Unmarshal(respBody, &envelope); err == nil {
+			payload := envelope.Result
+			if len(payload) == 0 {
+				payload = envelope.Results
 			}
-			return nil
+			if len(payload) > 0 {
+				if err := json.Unmarshal(payload, out); err != nil {
+					return fmt.Errorf("fga client: decode result: %w", err)
+				}
+				return nil
+			}
 		}
 		if err := json.Unmarshal(respBody, out); err != nil {
 			return fmt.Errorf("fga client: decode response: %w", err)

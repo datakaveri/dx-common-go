@@ -8,12 +8,15 @@
 // server is caught at compile time.
 package fga
 
-// SubjectType discriminates between user and group subjects.
+// SubjectType discriminates between user, group and agent subjects.
 type SubjectType string
 
 const (
 	SubjectTypeUser  SubjectType = "user"
 	SubjectTypeGroup SubjectType = "group"
+	// SubjectTypeAgent is an AI agent acting under a delegation grant. Agents
+	// only ever hold delegated_* relations — never the user's own relations.
+	SubjectTypeAgent SubjectType = "agent"
 )
 
 // CheckRequest asks whether a subject has a relation on a resource.
@@ -21,12 +24,20 @@ const (
 // For SubjectTypeGroup, OrganisationID must be set: groups are scoped to an
 // organisation in the FGA model (group:<org>_<group>#member).
 type CheckRequest struct {
-	SubjectType    SubjectType `json:"subject_type" validate:"required,oneof=user group"`
+	SubjectType    SubjectType `json:"subject_type" validate:"required,oneof=user group agent"`
 	SubjectID      string      `json:"subject_id" validate:"required"`
 	OrganisationID string      `json:"organisation_id,omitempty"`
 	ResourceType   string      `json:"resource_type" validate:"required"`
 	ResourceID     string      `json:"resource_id" validate:"required"`
 	Relation       string      `json:"relation" validate:"required"`
+
+	// The end user's realm roles, organisation and delegator (the token's
+	// did). dx-authz-go decides a user's read of a resource from the
+	// catalogue the Java way (owner / cos_admin / org_admin, access rules), so
+	// a PEP that has the token sends them. Optional; ignored by OpenFGA.
+	SubjectRoles          []string `json:"subject_roles,omitempty"`
+	SubjectOrganisationID string   `json:"subject_organisation_id,omitempty"`
+	DelegatorID           string   `json:"delegator_id,omitempty"`
 }
 
 // CheckResponse is the authorization decision.
@@ -39,7 +50,7 @@ type CheckResponse struct {
 
 // PolicyRequest grants or revokes a single relationship tuple.
 type PolicyRequest struct {
-	SubjectType    SubjectType `json:"subject_type" validate:"required,oneof=user group"`
+	SubjectType    SubjectType `json:"subject_type" validate:"required,oneof=user group agent"`
 	SubjectID      string      `json:"subject_id" validate:"required"`
 	OrganisationID string      `json:"organisation_id,omitempty"`
 	ResourceType   string      `json:"resource_type" validate:"required"`
