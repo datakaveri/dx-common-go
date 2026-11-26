@@ -21,10 +21,26 @@ import (
 // bytes for every request — including 401s and 502s — and spans never saw a
 // status. Now the replacement writer is installed as c.Writer for the rest of
 // the chain and the original restored afterwards.
+//
+// # A middleware that does not call next ends the chain
+//
+// gin runs the next handler when this one returns unless the chain is aborted.
+// A net/http middleware refuses a request by answering without calling next —
+// an auth middleware's 401, a validator's 400 — so when next was never called
+// the chain is aborted here. Without that the route handler still ran after
+// the refusal: an unauthenticated request reached it, and the response carried
+// two bodies (F61).
 func Wrap(mw func(http.Handler) http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		original := c.Writer
+		called := false
+		defer func() {
+			if !called {
+				c.Abort()
+			}
+		}()
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
 			c.Request = r
 			if w != http.ResponseWriter(original) {
 				// Start from gin's current status: on gin's own 404/405 path

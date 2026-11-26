@@ -11,7 +11,7 @@
 //
 // JSON field names MUST match dx-controlplane's UserActivityAuditSchema —
 // including the historical "asset_sort_discription" typo. UUID-typed fields
-// (user_id, org_id, app_id, delegator_id, asset_*_id, request_id) are parsed
+// (user_id, org_id, app_id, delegate_id, asset_*_id, request_id) are parsed
 // with parseUUID on the Java side: send valid UUIDs or omit them entirely.
 package auditing
 
@@ -52,6 +52,16 @@ const (
 	OriginMarketplace = "MARKETPLACE"
 )
 
+// ActorType values: who actually performed the action (Java auditing/v2
+// ActorType, column actor_type). DELEGATE — a delegate acting for the
+// delegator (user_id = delegator, delegate_id = the delegate); APP — an app
+// credential acting for its owner; SELF — the account holder directly.
+const (
+	ActorSelf     = "SELF"
+	ActorDelegate = "DELEGATE"
+	ActorApp      = "APP"
+)
+
 // createdAtLayout matches Java LocalDateTime.toString() (no zone); the value
 // is stored verbatim into a Postgres timestamp column.
 const createdAtLayout = "2006-01-02T15:04:05.000000"
@@ -71,7 +81,14 @@ type Record struct {
 	OrgType  string `json:"org_type,omitempty"`
 	AppID    string `json:"app_id,omitempty"` // UUID
 
-	// Delegation
+	// Delegation — Java v2 (UserActivityAuditSchema, dataplane DataPlaneAuditLog):
+	// DelegateID is the original caller after did delegation (UUID), ActorType
+	// one of ActorSelf/ActorDelegate/ActorApp.
+	DelegateID string `json:"delegate_id,omitempty"` // UUID
+	ActorType  string `json:"actor_type,omitempty"`
+
+	// Legacy v1 keys (controlplane ActivityAuditLogBuilder). The v2 consumer
+	// and table have no such fields; they are dropped there.
 	DelegatorID   string `json:"delegator_id,omitempty"` // UUID
 	DelegatorRole string `json:"delegator_role,omitempty"`
 
@@ -169,5 +186,29 @@ func (r *Record) fillIdentity(user auth.DxUser) {
 	}
 	if _, err := uuid.Parse(user.DelegatorID); err == nil {
 		r.DelegatorID = user.DelegatorID
+	}
+}
+
+// SetActor fills delegate_id and actor_type the Java auditing/v2 way
+// (AuditContextExtractor.getDelegateId/getActorType; dataplane rs #204): after
+// a resolved did delegation the user is the delegator and DelegateeID the
+// original caller (Java delegatee_sub) → DELEGATE with that id; otherwise an
+// app credential → APP; otherwise SELF. The legacy v1 delegator_id /
+// delegator_role are cleared — the v2 contract has neither (F60). Safe on nil.
+func (r *Record) SetActor(user auth.DxUser) {
+	if r == nil {
+		return
+	}
+	r.DelegatorID, r.DelegatorRole, r.DelegateID = "", "", ""
+	switch {
+	case user.DelegateeID != "":
+		r.ActorType = ActorDelegate
+		if _, err := uuid.Parse(user.DelegateeID); err == nil {
+			r.DelegateID = user.DelegateeID
+		}
+	case user.AppID != "":
+		r.ActorType = ActorApp
+	default:
+		r.ActorType = ActorSelf
 	}
 }

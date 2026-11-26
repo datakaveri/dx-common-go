@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package dx.user.v1;
+
+option go_package = "github.com/datakaveri/dx-common-go/grpc/userpb;userpb";
+
+// OrganisationService answers organisation questions for other platform
+// services from the organisation tables dx-user-go reads.
+//
+// Internal only. The caller is the verified WORKLOAD (metadata, checked by the
+// platform interceptor); dx-user-go keeps an allowlist of callers
+// (org_admin_callers). A caller not listed is PERMISSION_DENIED.
+service OrganisationService {
+  // GetOrgAdmin is Java getOrganisationAdminId(orgId).get(0): the admin an
+  // organisation's emails go to. dx-catalogue-go asks it for the "new asset
+  // created" email of an organisation's provider (Java
+  // notifyAdminOnItemCreation, F59). Java takes the first row of an unordered
+  // query; Go answers the longest-standing admin, so the answer is stable.
+  //
+  // NOT_FOUND when the organisation has no admin; INVALID_ARGUMENT for an
+  // org_id that is not a UUID.
+  rpc GetOrgAdmin(GetOrgAdminRequest) returns (GetOrgAdminResponse);
+}
+
+message GetOrgAdminRequest {
+  // The organisation, UUID.
+  string org_id = 1;
+}
+
+message GetOrgAdminResponse {
+  // The admin's user id (Keycloak subject), UUID.
+  string user_id = 1;
+}
