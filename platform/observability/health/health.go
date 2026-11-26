@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +58,10 @@ const (
 	StatusUp   Status = "up"
 	StatusDown Status = "down"
 )
+
+// drainingCheck is the name of the pseudo-check readiness reports while the
+// replica is shutting down, so the reason for the 503 is visible in the body.
+const drainingCheck = "shutdown"
 
 // Result is one dependency's outcome, as rendered in the readiness body.
 type Result struct {
@@ -92,6 +97,33 @@ type Registry struct {
 	mu      sync.RWMutex
 	entries []entry
 	timeout time.Duration
+	// draining is set once a stop signal arrives. From then on readiness
+	// reports down whatever the probes say, so the load balancer stops routing
+	// to this replica BEFORE its listener closes.
+	draining atomic.Bool
+}
+
+// SetDraining marks the replica as shutting down. Readiness reports down from
+// now on; liveness is unaffected, so the orchestrator does not restart a
+// replica that is merely finishing its work. It cannot be undone.
+func (r *Registry) SetDraining() { r.draining.Store(true) }
+
+// Draining reports whether SetDraining has been called.
+func (r *Registry) Draining() bool { return r.draining.Load() }
+
+// Names lists the registered checks, split into critical ones (which decide
+// readiness) and optional ones (reported only), in registration order.
+func (r *Registry) Names() (critical, optional []string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, e := range r.entries {
+		if e.critical {
+			critical = append(critical, e.name)
+		} else {
+			optional = append(optional, e.name)
+		}
+	}
+	return critical, optional
 }
 
 // New returns an empty Registry.
@@ -171,7 +203,7 @@ func (r *Registry) Probe(ctx context.Context) Report {
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}
-	if len(entries) == 0 {
+	if len(entries) == 0 && !r.draining.Load() {
 		// Nothing to check is ready, not broken: a service with no external
 		// dependencies is legitimately always ready.
 		return Report{Status: StatusUp}
@@ -198,6 +230,11 @@ func (r *Registry) Probe(ctx context.Context) Report {
 			overall = StatusDown
 		}
 		results[i].Took = res.took.Round(time.Millisecond).String()
+	}
+	if r.draining.Load() {
+		overall = StatusDown
+		results = append(results, Result{Name: drainingCheck, Status: StatusDown, Took: "0s",
+			Error: "replica is shutting down"})
 	}
 	return Report{Status: overall, Checks: results}
 }

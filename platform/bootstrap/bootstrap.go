@@ -163,6 +163,9 @@ type App[C config.Configurer] struct {
 	groupCtx context.Context
 	closers  []closer
 	workers  []worker
+	// started is when Run began, so the boot summary can report how long
+	// start-up took.
+	started time.Time
 }
 
 type closer struct {
@@ -273,6 +276,8 @@ func Run[C config.Configurer](spec Spec[C]) {
 
 // run is Run without the exit, so it is testable.
 func run[C config.Configurer](spec Spec[C]) error {
+	started := time.Now()
+
 	// 0. What role is this process playing? Read before anything else, so a
 	//    typo fails immediately rather than after a config load that may itself
 	//    fail for an unrelated reason and mask it.
@@ -319,7 +324,8 @@ func run[C config.Configurer](spec Spec[C]) error {
 
 	app := &App[C]{
 		Cfg: cfg, Log: log, Name: spec.Name, Version: spec.Version,
-		Health: health.New(),
+		Health:  health.New(),
+		started: started,
 	}
 
 	// 3a. Observability. After the logger so a failure is logged, and before
@@ -464,28 +470,66 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 		g.Go(func() error { return a.grpc.Serve(gctx) })
 	}
 
+	// One line that says what this process is running, so an operator does not
+	// have to reconstruct it from a dozen start-up lines.
+	a.logStarted(srv.Addr)
+
 	// Wait for a signal or the first worker failure.
 	<-gctx.Done()
-	a.Log.Info("shutting down")
+	// ctx is the signal context: if it is done, a stop was requested. If only
+	// gctx is done, a server or worker failed.
+	signalled := ctx.Err() != nil
+	shutdownStarted := time.Now()
+	cause := "stop signal"
+	if !signalled {
+		cause = "a server or worker failed"
+	}
+	a.Log.Info("shutting down", zap.String("cause", cause))
 
-	timeout := orDuration(base.Server.ShutdownTimeout, 20*time.Second)
+	// (0) Stop advertising readiness, then keep serving for drain_delay, so the
+	//     load balancer has removed this replica before its listener closes.
+	//     Closing first drops the requests routed during that propagation
+	//     window — on every rollout. Skipped when a component failed: that
+	//     replica should exit promptly, not linger.
+	if a.Health != nil {
+		a.Health.SetDraining()
+	}
+	if delay := base.Server.DrainDelay; signalled && delay > 0 {
+		a.Log.Info("reporting not-ready before closing the listener", zap.Duration("drain_delay", delay))
+		time.Sleep(delay)
+	}
 
-	// (a) Drain the server FIRST. The load balancer sees connections close and
-	//     stops sending work, and in-flight requests finish — including any
-	//     that are mid-write.
+	// ONE budget for everything below, not one per phase. Per-phase limits let
+	// shutdown run to three times shutdown_timeout — 60 s by default, past
+	// Kubernetes' default 30 s grace period, so SIGKILL landed before closers
+	// ran and buffered audit and telemetry data was lost.
+	//
+	// The budget is split so a slow phase cannot starve the ones after it:
+	// the HTTP drain may use up to the 50% mark, waiting for workers runs to
+	// the 75% mark, and closers always have at least the last 25%.
+	budget := orDuration(base.Server.ShutdownTimeout, 20*time.Second)
+	phaseStart := time.Now()
+	drainDeadline := phaseStart.Add(budget / 2)
+	workerDeadline := phaseStart.Add(budget * 3 / 4)
+	closeDeadline := phaseStart.Add(budget)
+
+	// (a) Drain the server. In-flight requests finish — including any that are
+	//     mid-write.
 	// WithoutCancel, not Background: ctx is already done by now, so deriving
 	// from it directly would give an expired context and drain nothing — but
 	// its values (trace id, deployment metadata) are still worth carrying into
 	// the shutdown spans.
-	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	shutCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), drainDeadline)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		a.Log.Warn("server did not drain cleanly", zap.Error(err))
 	}
+	a.Log.Info("http drained", zap.Duration("took", time.Since(phaseStart)))
 
 	// (b) Only now stop the workers, so a consumer is not killed while the
 	//     server is still accepting requests that depend on it.
 	stopWorkers()
+	phaseStart = time.Now()
 
 	// (c) Wait for in-flight work to finish, BOUNDED.
 	//
@@ -503,17 +547,24 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 	//
 	// The error is captured, not returned yet: the closers below must still run
 	// so infrastructure is released either way.
-	workerErr := a.waitForWorkers(timeout)
+	workerErr := a.waitForWorkers(time.Until(workerDeadline))
+	if workerErr == nil {
+		a.Log.Info("workers stopped", zap.Duration("took", time.Since(phaseStart)))
+	}
 
 	// (d) Close infrastructure, LIFO — the reverse of construction, so nothing
-	//     is closed while something that depends on it is still open.
-	closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	//     is closed while something that depends on it is still open. Each
+	//     close is logged, so the order and any slow resource are visible.
+	closeCtx, cancelClose := context.WithDeadline(context.WithoutCancel(ctx), closeDeadline)
 	defer cancelClose()
 	for i := len(a.closers) - 1; i >= 0; i-- {
 		c := a.closers[i]
+		start := time.Now()
 		if err := c.fn(closeCtx); err != nil {
 			a.Log.Warn("closer failed", zap.String("name", c.name), zap.Error(err))
+			continue
 		}
+		a.Log.Info("closed", zap.String("name", c.name), zap.Duration("took", time.Since(start)))
 	}
 
 	if workerErr != nil {
@@ -521,8 +572,42 @@ func (a *App[C]) serve(ctx context.Context, handler http.Handler, base config.Ba
 		// and calls os.Exit(1).
 		return workerErr
 	}
-	a.Log.Info("stopped")
+	a.Log.Info("stopped", zap.Duration("took", time.Since(shutdownStarted)))
 	return nil
+}
+
+// logStarted writes one summary line once every server and worker has been
+// launched: how long boot took, what is listening, which workers run, which
+// readiness checks exist, and the order closers will run at shutdown.
+func (a *App[C]) logStarted(httpAddr string) {
+	workers := make([]string, 0, len(a.workers))
+	for _, w := range a.workers {
+		name := w.name
+		if w.supervised {
+			name += " (supervised)"
+		}
+		workers = append(workers, name)
+	}
+	closeOrder := make([]string, 0, len(a.closers))
+	for i := len(a.closers) - 1; i >= 0; i-- {
+		closeOrder = append(closeOrder, a.closers[i].name)
+	}
+	var critical, optional []string
+	if a.Health != nil {
+		critical, optional = a.Health.Names()
+	}
+	fields := []zap.Field{
+		zap.String("http", httpAddr),
+		zap.Bool("grpc", a.grpc != nil),
+		zap.Strings("workers", workers),
+		zap.Strings("readiness_critical", critical),
+		zap.Strings("readiness_optional", optional),
+		zap.Strings("close_order", closeOrder),
+	}
+	if !a.started.IsZero() {
+		fields = append([]zap.Field{zap.Duration("boot", time.Since(a.started))}, fields...)
+	}
+	a.Log.Info("started", fields...)
 }
 
 // waitForWorkers waits for the errgroup within the shutdown budget.
@@ -535,14 +620,30 @@ func (a *App[C]) waitForWorkers(timeout time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- a.group.Wait() }()
 
-	select {
-	case err := <-done:
+	finished := func(err error) error {
 		// context.Canceled is the NORMAL path: stopWorkers cancelled them.
 		if err != nil && !errors.Is(err, context.Canceled) {
 			a.Log.Error("worker stopped with an error", zap.Error(err))
 			return err
 		}
 		return nil
+	}
+	// The budget left may already be zero or negative if the drain used its
+	// whole share. Workers that have already finished must still count as
+	// finished, so give a ready result priority over an expired timer —
+	// select would otherwise pick between them at random.
+	if timeout <= 0 {
+		timeout = time.Millisecond
+	}
+	select {
+	case err := <-done:
+		return finished(err)
+	default:
+	}
+
+	select {
+	case err := <-done:
+		return finished(err)
 	case <-time.After(timeout):
 		a.Log.Error("workers did not stop within the shutdown budget",
 			zap.Duration("timeout", timeout))
@@ -550,9 +651,14 @@ func (a *App[C]) waitForWorkers(timeout time.Duration) error {
 	}
 }
 
-const (
+var (
 	workerRetryBase = 500 * time.Millisecond
 	workerRetryMax  = 30 * time.Second
+	// workerHealthyRun is how long a supervised worker must run before a
+	// failure counts as a fresh one. Without the reset, a worker that failed a
+	// few times at start-up and then ran for days still waited the full
+	// workerRetryMax after its next failure.
+	workerHealthyRun = time.Minute
 )
 
 // runWorker runs a worker, restarting a supervised one with capped backoff.
@@ -566,14 +672,21 @@ func (a *App[C]) runWorker(ctx context.Context, w worker) error {
 
 	delay := workerRetryBase
 	for {
+		ranFrom := time.Now()
 		err := w.fn(ctx)
 		if ctx.Err() != nil {
 			return nil // shutting down
 		}
 		if err == nil {
 			// A supervised worker that returns nil without cancellation has
-			// finished its job; restarting it would be a busy loop.
+			// finished its job; restarting it would be a busy loop. Say so: a
+			// consumer loop that exits by mistake otherwise stops silently.
+			a.Log.Warn("background worker returned without an error — not restarting",
+				zap.String("name", w.name))
 			return nil
+		}
+		if time.Since(ranFrom) >= workerHealthyRun {
+			delay = workerRetryBase
 		}
 		a.Log.Error("background worker failed — restarting",
 			zap.String("name", w.name), zap.Duration("in", delay), zap.Error(err))

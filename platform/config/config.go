@@ -201,11 +201,22 @@ type Server struct {
 	// in main.go — which silently keeps the default 8080 when the value is a
 	// typo, so a mis-set port looks like it worked. Parsing here turns that
 	// into a boot failure with the offending value named.
-	Port            int           `mapstructure:"port"`
-	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
+	Port         int           `mapstructure:"port"`
+	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+	// ShutdownTimeout is the TOTAL time bootstrap allows for draining HTTP,
+	// stopping workers and running closers after a stop signal. It was once a
+	// per-phase limit, which let shutdown run to three times this value and
+	// past Kubernetes' default 30 s grace period.
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	// DrainDelay is how long the replica keeps serving after a stop SIGNAL
+	// while reporting not-ready, so the load balancer stops routing to it
+	// before the listener closes. Zero means no delay. It is spent before,
+	// and in addition to, ShutdownTimeout: keep DrainDelay + ShutdownTimeout
+	// below the orchestrator's grace period. Not applied when shutdown is
+	// caused by a failing worker or server, which should exit promptly.
+	DrainDelay time.Duration `mapstructure:"drain_delay"`
 	// MaxBodyBytes caps request bodies. Absent today fleet-wide, which
 	// SECURITY-REVIEW flags: without it any endpoint accepting JSON is a
 	// memory-exhaustion vector.
@@ -263,7 +274,10 @@ func PlatformDefaults() map[string]any {
 		"server.write_timeout":    "30s",
 		"server.idle_timeout":     "120s",
 		"server.shutdown_timeout": "20s",
-		"server.max_body_bytes":   1 << 20, // 1 MiB
+		// 5 s + the 20 s shutdown budget stays inside Kubernetes' default 30 s
+		// termination grace period. Set 0 for local runs that want instant ^C.
+		"server.drain_delay":    "5s",
+		"server.max_body_bytes": 1 << 20, // 1 MiB
 		// schema_mode has NO default, deliberately (ROADMAP P0-4 / review H-02).
 		// It used to default to "migrate", which meant an unconfigured pod
 		// applied DDL and N replicas raced each other for golang-migrate's

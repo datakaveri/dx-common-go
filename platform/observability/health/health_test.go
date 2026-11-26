@@ -243,3 +243,64 @@ func TestConcurrentAddAndProbe(t *testing.T) {
 	}
 	<-done
 }
+
+// TestDrainingMakesReadyUnavailable: once draining, readiness is 503 even with
+// every probe passing — and even with no probes at all — while liveness stays
+// 200 so the orchestrator does not restart a replica that is finishing work.
+func TestDrainingMakesReadyUnavailable(t *testing.T) {
+	for name, reg := range map[string]*health.Registry{
+		"with probes": func() *health.Registry {
+			r := health.New()
+			r.Add("db", health.CheckerFunc(func(context.Context) error { return nil }))
+			return r
+		}(),
+		"no probes": health.New(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ready := httptest.NewRecorder()
+			reg.Ready()(ready, httptest.NewRequest(http.MethodGet, "/healthz/ready", nil))
+			if ready.Code != http.StatusOK {
+				t.Fatalf("before draining: ready = %d, want 200", ready.Code)
+			}
+
+			reg.SetDraining()
+			ready = httptest.NewRecorder()
+			reg.Ready()(ready, httptest.NewRequest(http.MethodGet, "/healthz/ready", nil))
+			if ready.Code != http.StatusServiceUnavailable {
+				t.Errorf("while draining: ready = %d, want 503", ready.Code)
+			}
+			var rep health.Report
+			if err := json.Unmarshal(ready.Body.Bytes(), &rep); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, c := range rep.Checks {
+				found = found || (c.Name == "shutdown" && c.Status == health.StatusDown)
+			}
+			if !found {
+				t.Errorf("readiness body does not say why: %+v", rep)
+			}
+
+			live := httptest.NewRecorder()
+			reg.Live()(live, httptest.NewRequest(http.MethodGet, "/healthz/live", nil))
+			if live.Code != http.StatusOK {
+				t.Errorf("while draining: live = %d, want 200", live.Code)
+			}
+		})
+	}
+}
+
+func TestNamesSplitsCriticalAndOptional(t *testing.T) {
+	r := health.New()
+	ok := health.CheckerFunc(func(context.Context) error { return nil })
+	r.Add("postgres", ok)
+	r.AddOptional("rabbitmq", ok)
+	r.Add("redis", ok)
+	critical, optional := r.Names()
+	if len(critical) != 2 || critical[0] != "postgres" || critical[1] != "redis" {
+		t.Errorf("critical = %v", critical)
+	}
+	if len(optional) != 1 || optional[0] != "rabbitmq" {
+		t.Errorf("optional = %v", optional)
+	}
+}

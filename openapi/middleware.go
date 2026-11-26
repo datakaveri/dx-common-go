@@ -66,7 +66,10 @@ func ValidationMiddleware(loader *Loader, cfg Config) func(http.Handler) http.Ha
 
 			if cfg.ValidateRequests {
 				if err := openapi3filter.ValidateRequest(r.Context(), input); err != nil {
-					dxerrors.WriteError(w, dxerrors.NewValidation("request validation failed"))
+					// The detail stays fixed so clients matching on it keep
+					// working; the errors list says WHICH field failed and why.
+					dxerrors.WriteError(w, dxerrors.NewValidation("request validation failed",
+						describeRequestError(err)))
 					return
 				}
 			}
