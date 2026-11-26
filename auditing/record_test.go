@@ -12,11 +12,14 @@ import (
 )
 
 // javaSchemaKeys is the authoritative field list from the Java
-// UserActivityAuditSchema constants (dx-controlplane). The Go Record must
-// never emit a key outside this set or the Java entity parser may reject it.
+// UserActivityAuditSchema constants (dx-controlplane auditing/v2), plus the
+// two legacy v1 keys delegator_id/delegator_role that older publishers still
+// send (the v2 consumer ignores them). The Go Record must never emit a key
+// outside this set or the Java entity parser may reject it.
 var javaSchemaKeys = map[string]struct{}{
 	"id": {}, "user_id": {}, "user_name": {}, "org_id": {}, "org_name": {},
 	"org_type": {}, "app_id": {}, "role": {}, "issuer": {},
+	"delegate_id": {}, "actor_type": {},
 	"delegator_id": {}, "delegator_role": {},
 	"api": {}, "method": {}, "action": {}, "origin_server": {},
 	"asset_id": {}, "asset_name": {}, "asset_sort_discription": {},
@@ -33,6 +36,7 @@ func fullRecord() *Record {
 	return &Record{
 		ID: id, UserID: id, UserName: "u", Role: "provider", Issuer: "kc",
 		OrgID: id, OrgName: "o", OrgType: "t", AppID: id,
+		DelegateID: id, ActorType: ActorDelegate,
 		DelegatorID: id, DelegatorRole: "consumer",
 		API: "/x", Method: "POST", Action: "A", OriginServer: "ACL",
 		AssetID: id, AssetName: "a", AssetShortDescription: "d",
@@ -115,5 +119,12 @@ func TestSetActionNilSafe(t *testing.T) {
 	req := httptest.NewRequest("GET", "/x", nil)
 	if r := SetAction(req.Context(), "A"); r != nil {
 		t.Fatal("expected nil record without middleware")
+	}
+}
+
+// Java v2 ActorType: exactly SELF, DELEGATE, APP.
+func TestActorTypesAreJavas(t *testing.T) {
+	if ActorSelf != "SELF" || ActorDelegate != "DELEGATE" || ActorApp != "APP" {
+		t.Fatalf("actor types = %q %q %q", ActorSelf, ActorDelegate, ActorApp)
 	}
 }

@@ -103,3 +103,39 @@ func TestWrapKeepsGinMethodNotAllowed(t *testing.T) {
 		t.Fatalf("response = %d, want 405", rec.Code)
 	}
 }
+
+// A middleware that answers without calling next (an auth middleware's 401, a
+// request validator's 400) must END the gin chain. It used to fall through:
+// gin ran the route handler after the refusal, so an unauthenticated request
+// reached the handler and the response carried two bodies (F61).
+func TestWrapRefusalStopsTheChain(t *testing.T) {
+	refuse := func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("no"))
+		})
+	}
+	ran := false
+	r := ginWith(Wrap(refuse))
+	r.GET("/x", func(c *gin.Context) { ran = true; c.String(http.StatusOK, "handler") })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if ran {
+		t.Fatal("route handler ran after the middleware refused the request")
+	}
+	if rec.Code != http.StatusUnauthorized || rec.Body.String() != "no" {
+		t.Fatalf("response = %d %q", rec.Code, rec.Body.String())
+	}
+
+	// On a route group as well (the proxy's protected routes).
+	ran = false
+	r = ginWith()
+	g := r.Group("/g")
+	g.Use(Wrap(refuse))
+	g.GET("/x", func(c *gin.Context) { ran = true })
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/g/x", nil))
+	if ran || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("group: ran=%v code=%d", ran, rec.Code)
+	}
+}
